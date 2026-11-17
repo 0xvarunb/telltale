@@ -1,0 +1,44 @@
+{
+  "base_path": "/maib-reports/test-vessel-report-alpha",
+  "title": "Test vessel report alpha",
+  "document_type": "maib_report",
+  "schema_name": "specialist_document",
+  "public_updated_at": "2026-03-12T10:15:00.000+00:00",
+  "details": {
+    "body": "<p>Synthetic summary of a test vessel report.</p>",
+    "metadata": {
+      "vessel_type": ["merchant-vessel-100-gross-tons-or-over"],
+      "report_type": "investigation-report",
+      "date_of_occurrence": "2025-06-01"
+    },
+    "attachments": [
+      {
+        "attachment_type": "file",
+        "content_type": "application/pdf",
+        "file_size": 120000,
+        "filename": "summary.pdf",
+        "id": "summary.pdf",
+        "title": "Summary",
+        "url": "https://assets.publishing.service.gov.uk/media/aaa111/summary.pdf"
+      },
+      {
+        "attachment_type": "file",
+        "content_type": "application/pdf",
+        "file_size": 4500000,
+        "filename": "full-report.pdf",
+        "id": "full-report.pdf",
+        "title": "Full report",
+        "url": "https://assets.publishing.service.gov.uk/media/bbb222/full-report.pdf"
+      },
+      {
+        "attachment_type": "file",
+        "content_type": "image/jpeg",
+        "file_size": 9900000,
+        "filename": "photo.jpg",
+        "id": "photo.jpg",
+        "title": "Photo",
+        "url": "https://assets.publishing.service.gov.uk/media/ccc333/photo.jpg"
+      }
+    ]
+  }
+}

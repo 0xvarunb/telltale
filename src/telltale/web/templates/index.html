@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block main %}
+      <h1>What went wrong on other ships doing this job?</h1>
+
+      <form class="ask" method="post" action="/ask">
+        <label for="question">Describe the job, the ship type and anything else that matters.</label>
+        <textarea id="question" name="question" rows="4"
+          placeholder="For example: entering a ballast tank on a bulk carrier in port"
+          {% if message %}aria-describedby="message" aria-invalid="true"{% endif %}>{{ question }}</textarea>
+        {% if message %}<p id="message" class="message" role="alert">{{ message }}</p>{% endif %}
+        <button type="submit">Search the reports</button>
+      </form>
+
+      {% if view %}
+      <div class="result{% if view.sources %} with-sources{% endif %}">
+        <section class="answer" aria-labelledby="answer-heading">
+          <h2 id="answer-heading">What the reports say</h2>
+          {% if view.lines %}
+          <ol class="sentences">
+            {% for line in view.lines %}
+            <li{% if line.plain %} class="plain"{% endif %}>{{ line.text }}
+              {%- if not line.plain -%}
+                {%- if line.marks %}<span class="marks">
+                  {%- for n in line.marks %}<a class="mark" href="#source-{{ n }}" aria-label="Source {{ n }}">{{ n }}</a>{% endfor -%}
+                </span>
+                {%- else %} <span class="no-source">no source</span>
+                {%- endif -%}
+              {%- endif -%}
+            </li>
+            {% endfor %}
+          </ol>
+          {% endif %}
+          {% if view.notice %}<p class="notice">{{ view.notice }}</p>{% endif %}
+          <p class="cost">{{ view.cost }}</p>
+        </section>
+
+        {% if view.sources %}
+        <section class="sources" aria-labelledby="sources-heading">
+          <h2 id="sources-heading">Sources</h2>
+          <ol>
+            {% for entry in view.sources %}
+            <li id="source-{{ entry.number }}">
+              <span class="number">{{ entry.number }}</span>
+              <div class="entry">
+                <h3>{{ entry.title }}</h3>
+                {% if entry.page is not none %}<p class="page-no">Page {{ entry.page }}</p>{% endif %}
+                {% for passage in entry.passages %}
+                <blockquote>{{ passage }}</blockquote>
+                {% endfor %}
+                {% if entry.link %}<a class="pdf" href="{{ entry.link }}" target="_blank" rel="noopener">Open the report{% if entry.page is not none %} at page {{ entry.page }}{% endif %}</a>{% endif %}
+                <p class="credit">Crown copyright</p>
+              </div>
+            </li>
+            {% endfor %}
+          </ol>
+        </section>
+        {% endif %}
+      </div>
+      {% endif %}
+{% endblock %}

@@ -1,0 +1,444 @@
+"""Command line: `telltale ingest` builds the store and search index; `telltale ask` answers;
+`telltale serve` runs the local web page."""
+
+import argparse
+import csv
+import logging
+import sys
+from collections import Counter
+from pathlib import Path
+
+import anthropic
+import httpx
+import uvicorn
+
+from telltale.answer import answer, is_no_answer, stop_notice
+from telltale.departments import RULES, departments
+from telltale.http import describe
+from telltale.ingest.download import DownloadError, download_pdf
+from telltale.ingest.extract import group_by_page, read_pages, to_passages
+from telltale.ingest.ocr import LocalOcr, PageReader
+from telltale.ingest.store import Store
+from telltale.ingest.webpage import page_passages
+from telltale.models import Answer, ReportMeta
+from telltale.question import question_problem
+from telltale.search import EmbedderUnavailable, FastEmbedder, HybridIndex, SearchIndexError
+from telltale.settings import Settings, SettingsError, load_settings
+from telltale.sources.maib import ListingError, SkippedReport, list_merchant_reports
+from telltale.web import create_app
+
+STORE_FILE = "telltale.sqlite"
+PDF_DIR = "pdf"
+INDEX_DIR = "index"
+MODEL_DIR = "models"
+DEPARTMENTS_FILE = "departments.csv"
+OCR_DIR = "ocr"
+HTTP_TIMEOUT_SECONDS = 30.0
+CROWN_COPYRIGHT = "Crown copyright"
+RUN_INGEST = "Run `telltale ingest` first."
+MODEL_OFFLINE = (
+    "The search model is not available offline. Run `telltale ingest` once with internet access."
+)
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8000
+
+logger = logging.getLogger(__name__)
+
+
+class CommandError(Exception):
+    """A problem to report in a line or two, without a traceback."""
+
+
+def _groups(n: int) -> str:
+    return f"{n:,} page group" + ("" if n == 1 else "s")
+
+
+def _why(error: Exception) -> str:
+    return describe(error) if isinstance(error, httpx.HTTPError) else str(error)
+
+
+class ReportFailed(Exception):
+    """One report's PDF could not be downloaded or read; the run carries on."""
+
+
+def _store_text(
+    client: httpx.Client,
+    store: Store,
+    meta: ReportMeta,
+    pdf_dir: Path,
+    ocr: PageReader | None = None,
+    ocr_dir: Path | None = None,
+) -> str:
+    """Download and extract one report's PDF into the store, and say what happened. A report
+    with no PDF is stored from the text of its GOV.UK page instead.
+
+    Raises `ReportFailed` on a download or PDF error, which the caller records and passes over.
+    """
+    try:
+        path = download_pdf(client, meta, pdf_dir)
+    except (httpx.HTTPError, DownloadError, OSError) as error:
+        raise ReportFailed(f"download failed: {_why(error)}") from error
+    if path is None:
+        passages = page_passages(meta.page_html or "")
+        groups = group_by_page([(1, passage) for passage in passages])
+        store.replace_chunks(meta.slug, groups)
+        if not groups:
+            return "no PDF link and no page text"
+        return f"no PDF, {_groups(len(groups))} from the GOV.UK page"
+    try:
+        pages = read_pages(path, ocr=ocr, cache_dir=ocr_dir)
+    except Exception as error:  # pypdf raises many kinds of error on a damaged file
+        raise ReportFailed(f"PDF could not be read: {type(error).__name__}: {error}") from error
+    groups = group_by_page(to_passages([text for text, _ in pages]))
+    ocr_pages = frozenset(number for number, (_, by_ocr) in enumerate(pages, start=1) if by_ocr)
+    store.replace_chunks(meta.slug, groups, ocr_pages)
+    note = f", {len(ocr_pages)} page{'' if len(ocr_pages) == 1 else 's'} read by OCR" if ocr_pages else ""
+    return _groups(len(groups)) + note
+
+
+def _print_reports(heading: str, reports: list[tuple[str, str, str]]) -> None:
+    """A heading with a count, then each report's title (and note) and page link."""
+    print(f"\n{heading} ({len(reports)}):")
+    for title, note, link in reports:
+        print(f"  - {title}{': ' + note if note else ''}")
+        print(f"    {link or 'no page link'}")
+
+
+def page_reader() -> PageReader:
+    """OCR for scanned pages. Tests replace this so no OCR model is loaded."""
+    return LocalOcr()
+
+
+def embedder(data_dir: Path) -> FastEmbedder:
+    """The local embedding model, kept in the data folder so it survives a reboot offline."""
+    return FastEmbedder(cache_dir=data_dir / MODEL_DIR)
+
+
+def ingest(data_dir: Path, limit: int | None) -> None:
+    """List, download, extract and store MAIB reports, rebuild the search index, report."""
+    pdf_dir, index_dir, ocr_dir = data_dir / PDF_DIR, data_dir / INDEX_DIR, data_dir / OCR_DIR
+    ocr = page_reader()
+    skipped: list[SkippedReport] = []
+    failed: list[tuple[ReportMeta, str]] = []
+
+    with (
+        httpx.Client(timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=True) as client,
+        Store(data_dir / STORE_FILE) as store,
+    ):
+        print("Listing MAIB reports (one request per report; this takes a while).")
+        try:
+            reports = list_merchant_reports(client, limit=limit, on_skip=skipped.append)
+        except (httpx.HTTPError, ListingError) as error:
+            raise CommandError(f"Could not list MAIB reports: {_why(error)}") from error
+        print(f"Listed {len(reports)} reports.")
+
+        for n, meta in enumerate(reports, start=1):
+            store.upsert_report(meta)
+            try:
+                outcome = _store_text(client, store, meta, pdf_dir, ocr, ocr_dir)
+            except ReportFailed as error:
+                failed.append((meta, str(error)))
+                logger.warning("%s: %s", meta.slug, error)
+                outcome = "FAILED, listed under errors below"
+            print(f"[{n}/{len(reports)}] {meta.slug}: {outcome}")
+
+        # Always rebuilt from the whole store, never loaded (Ruling 12). A failure is reported
+        # after the lists below, so they are never lost to it.
+        chunks = store.chunks()
+        print(f"Building the search index over {_groups(len(chunks))}.")
+        index_error: Exception | None = None
+        try:
+            HybridIndex.build(chunks, embedder(data_dir)).save(index_dir)
+        except Exception as error:
+            index_error = error
+            if not isinstance(error, EmbedderUnavailable):
+                # Not the expected offline case, so keep the traceback for a bug report.
+                logger.warning("The search index build failed", exc_info=error)
+
+        counts = store.counts()
+        print(f"\nStore {data_dir / STORE_FILE}, all runs so far:")
+        print(f"  Reports:                 {counts['reports']:,}")
+        for kind, count in store.report_types().items():
+            print(f"    {kind}: {count:,}")
+        print(f"  Reports with a PDF link: {counts['with_pdf']:,}")
+        print(f"  Reports read from their GOV.UK page (no PDF): {counts['from_page']:,}")
+        print(f"  Page groups (chunks):    {counts['chunks']:,}")
+        print(f"  Passages:                {counts['passages']:,}")
+        print(f"  Pages read by OCR:       {store.ocr_pages():,}")
+        if index_error is None:
+            print(f"Search index saved to {index_dir}")
+
+        _print_reports(
+            "Reports with no PDF link and no page text, not searchable",
+            [(m.title, "", m.page_url) for m in store.missing_pdf()],
+        )
+        _print_reports(
+            "Reports with a PDF link but no text (download failed, unreadable or image-only PDF), "
+            "not searchable",
+            [(m.title, "", m.page_url) for m in store.without_text()],
+        )
+
+    _print_reports("Errors this run", [(m.title, why, m.page_url) for m, why in failed])
+    dropped = [s for s in skipped if s.dropped]
+    _print_reports(
+        "Left out of the listing because they could not be read",
+        [(s.title, s.reason, s.page_url) for s in dropped],
+    )
+    others = Counter(s.reason for s in skipped if not s.dropped)
+    detail = ", ".join(f"{kind} {count}" for kind, count in sorted(others.items()))
+    print(
+        f"\nOther report types left out: {others.total()}"
+        + (f" ({detail})" if detail else "")
+    )
+
+    if isinstance(index_error, EmbedderUnavailable):
+        raise CommandError(
+            f"\nThe search index was not built: {index_error}. The reports above are stored; "
+            "run `telltale ingest` again with internet access to build it."
+        ) from index_error
+    if index_error is not None:
+        raise CommandError(
+            f"\nThe search index was not built: {type(index_error).__name__}: {index_error}. "
+            "The reports above are stored; run `telltale ingest` again to build it."
+        ) from index_error
+
+
+def load_index(data_dir: Path) -> HybridIndex:
+    """The saved search index over the stored chunks; `CommandError` if missing or stale."""
+    store_path = data_dir / STORE_FILE
+    if not store_path.is_file():
+        raise CommandError(f"No report store at {store_path}. {RUN_INGEST}")
+    with Store(store_path) as store:
+        chunks = store.chunks()
+    try:
+        return HybridIndex.load(data_dir / INDEX_DIR, chunks, embedder(data_dir))
+    except SearchIndexError as error:
+        raise CommandError(
+            f"The search index is missing or out of date: {error}. {RUN_INGEST}"
+        ) from error
+
+
+def print_answer(result: Answer) -> None:
+    """Numbered sentences (`[no source]` on unsourced ones), numbered sources, then the cost."""
+    numbers: dict[str, int] = {}
+    titles: dict[str, str] = {}
+    pages: dict[str, int | None] = {}
+    notice, notice_only = stop_notice(result)
+
+    if notice_only:
+        print(notice)
+    else:
+        n = 0
+        for sentence in result.sentences:
+            if is_no_answer(sentence):
+                print(sentence.text)
+                continue
+            refs: list[int] = []
+            for citation in sentence.citations:
+                number = numbers.setdefault(citation.source, len(numbers) + 1)
+                titles.setdefault(citation.source, citation.report_title)
+                pages.setdefault(citation.source, citation.page)
+                if number not in refs:
+                    refs.append(number)
+            n += 1
+            mark = "".join(f"[{number}]" for number in refs) if refs else "[no source]"
+            print(f"{n}. {sentence.text} {mark}")
+        if notice:
+            print(f"\n{notice}")
+
+    if numbers:
+        print("\nSources:")
+        for source, number in numbers.items():
+            where = f", page {pages[source]}" if pages[source] is not None else ""
+            print(f"[{number}] {titles[source]}{where}. {CROWN_COPYRIGHT}.")
+            print(f"    {source}")
+
+    print(
+        f"\nCost: ${result.cost_usd:.4f} "
+        f"({result.input_tokens:,} in / {result.output_tokens:,} out)"
+    )
+
+
+def _settings_with_key(command: str) -> Settings:
+    """Settings with the API key, which `ask` and `serve` need (Ruling 16)."""
+    try:
+        return load_settings()
+    except SettingsError as error:
+        raise CommandError(
+            f"{error}. `telltale {command}` needs it; `telltale ingest` does not."
+        ) from error
+
+
+def ask(question: str) -> None:
+    # The same checks as the page, before any key, index or model is touched.
+    problem = question_problem(question)
+    if problem is not None:
+        raise CommandError(problem)
+    question = question.strip()
+    settings = _settings_with_key("ask")
+    index = load_index(settings.data_dir)
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    try:
+        result = answer(question, index, client, settings.model)
+    except EmbedderUnavailable as error:
+        raise CommandError(MODEL_OFFLINE) from error
+    except anthropic.APIError as error:
+        raise CommandError(f"The request to Claude failed: {error}") from error
+    print_answer(result)
+
+
+def serve(host: str, port: int) -> None:
+    """Load the store, index and embedding model once, then run the web page until stopped."""
+    settings = _settings_with_key("serve")
+    index = load_index(settings.data_dir)
+    try:
+        # Loads the embedding model now, so an offline laptop fails here, not on the first question.
+        index.search("start-up check", k=1)
+    except EmbedderUnavailable as error:
+        raise CommandError(MODEL_OFFLINE) from error
+    except SearchIndexError as error:
+        raise CommandError(
+            f"The search index is missing or out of date: {error}. {RUN_INGEST}"
+        ) from error
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    app = create_app(lambda question: answer(question, index, client, settings.model))
+    print(f"Telltale is running at http://{host}:{port}/ (press Ctrl+C to stop).")
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
+def sort_by_department(data_dir: Path, show_list: bool) -> None:
+    """Count the stored reports by department, from their titles, and write a CSV to check."""
+    store_path = data_dir / STORE_FILE
+    if not store_path.is_file():
+        raise CommandError(f"No report store at {store_path}. {RUN_INGEST}")
+    with Store(store_path) as store:
+        reports = store.reports()
+
+    rows = []
+    for meta in reports:
+        placements = departments(meta.title)
+        rows.append((meta, placements))
+
+    unsorted = [meta for meta, placements in rows if not placements]
+    several = sum(1 for _, placements in rows if len(placements) > 1)
+    print(f"{len(reports):,} reports, sorted from the words in their titles:")
+    for department in RULES:
+        count = sum(1 for _, ps in rows if any(p.department == department for p in ps))
+        print(f"  {department}: {count:,}")
+    print(f"  In more than one department: {several:,}")
+    print(f"  Not sorted (title too general): {len(unsorted):,}")
+
+    out = data_dir / DEPARTMENTS_FILE
+    with out.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["title", "report type", "departments", "matched words", "page link"])
+        for meta, placements in rows:
+            writer.writerow([
+                meta.title,
+                meta.report_type,
+                "; ".join(p.department for p in placements) or "Not sorted",
+                "; ".join(f"{p.department}: {', '.join(p.matched)}" for p in placements),
+                meta.page_url,
+            ])
+    print(f"Every report, with the words that placed it: {out}")
+
+    if show_list:
+        for department in [*RULES, "Not sorted"]:
+            titles = [
+                meta.title
+                for meta, ps in rows
+                if (department == "Not sorted" and not ps)
+                or any(p.department == department for p in ps)
+            ]
+            print(f"\n{department} ({len(titles)}):")
+            for title in titles:
+                print(f"  - {title}")
+
+
+def _positive(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+    return number
+
+
+def _port(value: str) -> int:
+    number = int(value)
+    if not 1 <= number <= 65535:
+        raise argparse.ArgumentTypeError("must be between 1 and 65535")
+    return number
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="telltale",
+        description="Briefs ship's officers from published accident reports, every sentence cited.",
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    ingest_parser = commands.add_parser(
+        "ingest",
+        help="download MAIB reports and build the search index",
+        description="List MAIB merchant-ship reports, download and extract their "
+        "PDFs into the store, rebuild the search index and list any report left unsearchable. "
+        "Safe to re-run: PDFs already downloaded are kept. Needs no API key.",
+    )
+    ingest_parser.add_argument(
+        "--limit", type=_positive, metavar="N", help="stop after N reports"
+    )
+    ask_parser = commands.add_parser(
+        "ask",
+        help="ask what has gone wrong on other ships during a job",
+        description="Answer from the stored reports, every sentence linked to its source. "
+        "Needs ANTHROPIC_API_KEY and a finished `telltale ingest`.",
+    )
+    ask_parser.add_argument("question", help="the job the ship is about to do, in plain words")
+    departments_parser = commands.add_parser(
+        "departments",
+        help="count the stored reports by shipboard department",
+        description="Sort the stored reports into Bridge and navigation, Deck, Engine and "
+        "Catering and accommodation from the words in their titles, print the counts and "
+        "write every report with the words that placed it to data/departments.csv for "
+        "checking. Needs a finished `telltale ingest`; no API key.",
+    )
+    departments_parser.add_argument(
+        "--list", action="store_true", help="also print every title under its department"
+    )
+    serve_parser = commands.add_parser(
+        "serve",
+        help="run the local web page",
+        description="Run the question page in your browser: each sentence links to its "
+        "sources, or is marked when it has none. Needs ANTHROPIC_API_KEY and a finished "
+        "`telltale ingest`.",
+    )
+    serve_parser.add_argument(
+        "--host",
+        default=DEFAULT_HOST,
+        help=f"address to listen on (default {DEFAULT_HOST}, this computer only). The page "
+        "has no login and every question spends API credit, so keep 127.0.0.1 unless the "
+        "network is trusted",
+    )
+    serve_parser.add_argument(
+        "--port", type=_port, default=DEFAULT_PORT, help=f"port (default {DEFAULT_PORT})"
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+    try:
+        if args.command == "ingest":
+            ingest(load_settings(require_key=False).data_dir, args.limit)
+        elif args.command == "ask":
+            ask(args.question)
+        elif args.command == "departments":
+            sort_by_department(load_settings(require_key=False).data_dir, args.list)
+        else:
+            serve(args.host, args.port)
+    except CommandError as error:
+        print(error, file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("Stopped. Re-run to carry on; nothing is downloaded twice.", file=sys.stderr)
+        return 130
+    return 0

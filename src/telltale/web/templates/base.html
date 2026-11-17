@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Telltale{% endblock %}</title>
+  <link rel="icon" href="/static/telltale-icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="page">
+    <header class="masthead">
+      <a class="brand" href="/"><img src="/static/telltale-logo.svg" alt="Telltale" width="150" height="55"></a>
+      <span class="tag">From published accident reports</span>
+    </header>
+
+    <main>
+{% block main %}{% endblock %}
+    </main>
+
+    <footer>
+      <p>Stage 1 of 6: RAG (retrieval-augmented generation). The tool first finds the report passages that match your job, then writes only from them. Reports: UK MAIB, Crown copyright.</p>
+      <p><a href="/limits">What this tool can't do</a></p>
+    </footer>
+  </div>
+
+  <!-- Web fonts last, so the page shows at once in the local fonts when the ship is offline. -->
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=EB+Garamond:wght@500;600&amp;family=Geist:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+</body>
+</html>

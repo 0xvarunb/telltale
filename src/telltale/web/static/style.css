@@ -1,0 +1,386 @@
+/* Telltale question page. Web fonts load last; the local fallbacks must look right on their own. */
+
+:root {
+  --paper: #f4f1ea;
+  --ink: #13283b;
+  --orange: #e8501a;
+  --green: #2f6b4a;
+  /* The brand orange darkened for text, so it reads on paper (5.3:1); borders keep the orange. */
+  --orange-text: #b33a0e;
+  --ink-soft: #4a5a68;
+  --rule: #d9d3c5;
+  --card: #fbf9f4;
+  --serif: "EB Garamond", Garamond, "Iowan Old Style", "Palatino Linotype", Palatino,
+    "Book Antiqua", Georgia, serif;
+  --sans: Geist, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    "Liberation Sans", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono",
+    "Liberation Mono", monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 17px;
+  line-height: 1.55;
+}
+
+.page {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 24px 20px 40px;
+}
+
+a {
+  color: var(--green);
+}
+
+a:focus-visible,
+button:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid var(--green);
+  outline-offset: 2px;
+}
+
+/* Masthead */
+
+.masthead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 18px;
+  padding-bottom: 14px;
+  border-bottom: 2px solid var(--ink);
+}
+
+.brand {
+  display: block;
+  align-self: center;
+  margin-left: -6px;
+  line-height: 0;
+}
+
+/* The logo as drawn in docs/brand: the "ll" are the green and orange lamps. */
+.brand img {
+  display: block;
+  width: 150px;
+  height: auto;
+}
+
+.tag {
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+/* Question */
+
+h1 {
+  font-family: var(--serif);
+  font-weight: 500;
+  font-size: clamp(30px, 6vw, 46px);
+  line-height: 1.1;
+  letter-spacing: -0.005em;
+  margin: 32px 0 20px;
+  max-width: 22ch;
+}
+
+.ask {
+  max-width: 720px;
+}
+
+.ask label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--ink-soft);
+}
+
+textarea {
+  display: block;
+  width: 100%;
+  min-height: 7.5em;
+  padding: 12px 14px;
+  border: 1.5px solid var(--ink);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+textarea::placeholder {
+  color: #8a949c;
+}
+
+textarea[aria-invalid="true"] {
+  border-color: var(--orange);
+}
+
+.message {
+  margin: 8px 0 0;
+  color: var(--orange-text);
+  font-weight: 600;
+}
+
+button {
+  margin-top: 14px;
+  padding: 11px 22px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--ink);
+  color: var(--paper);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--green);
+}
+
+/* Answer and sources */
+
+.result {
+  display: grid;
+  gap: 28px;
+  margin-top: 40px;
+}
+
+h2 {
+  font-family: var(--serif);
+  font-weight: 600;
+  font-size: 26px;
+  line-height: 1.2;
+  margin: 0 0 14px;
+}
+
+.sentences {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sentences li {
+  padding: 9px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.sentences li:first-child {
+  border-top: 1px solid var(--rule);
+}
+
+.marks {
+  white-space: nowrap;
+}
+
+.mark {
+  display: inline-block;
+  min-width: 1.5em;
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--green);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: center;
+  text-decoration: none;
+  vertical-align: 2px;
+}
+
+.mark:hover {
+  background: var(--ink);
+}
+
+.no-source {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1.5px solid var(--orange);
+  border-radius: 3px;
+  color: var(--orange-text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  vertical-align: 1px;
+}
+
+.notice {
+  margin: 16px 0 0;
+  padding: 10px 14px;
+  border-left: 4px solid var(--orange);
+  background: var(--card);
+}
+
+.cost {
+  margin: 18px 0 0;
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.sources ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sources li {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--card);
+}
+
+.sources li:target {
+  border-color: var(--green);
+  box-shadow: 0 0 0 2px var(--green);
+}
+
+.number {
+  flex: none;
+  width: 1.9em;
+  height: 1.9em;
+  border-radius: 50%;
+  background: var(--green);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.9em;
+  text-align: center;
+}
+
+.entry {
+  min-width: 0;
+}
+
+.entry h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.page-no {
+  margin: 2px 0 8px;
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+blockquote {
+  margin: 0 0 8px;
+  padding-left: 12px;
+  border-left: 3px solid var(--rule);
+  font-family: var(--serif);
+  font-size: 18px;
+  line-height: 1.45;
+}
+
+.pdf {
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.credit {
+  margin: 4px 0 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+/* Limits page */
+
+.limits {
+  max-width: 720px;
+}
+
+.limits h2 {
+  margin-top: 32px;
+}
+
+.limits .lead {
+  color: var(--ink-soft);
+}
+
+.limits ul {
+  padding-left: 1.2em;
+}
+
+.limits li {
+  margin-bottom: 8px;
+}
+
+.limits .owed {
+  color: var(--orange-text);
+}
+
+.limits .back {
+  margin-top: 24px;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+}
+
+/* Footer */
+
+footer {
+  margin-top: 48px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+  color: var(--ink-soft);
+  font-size: 14px;
+  max-width: 720px;
+}
+
+footer p {
+  margin: 0 0 6px;
+}
+
+@media (min-width: 900px) {
+  .page {
+    padding: 36px 40px 48px;
+  }
+
+  .result.with-sources {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    gap: 40px;
+  }
+}
+
+@media (max-width: 480px) {
+  body {
+    font-size: 16px;
+  }
+
+  .page {
+    padding: 16px 16px 32px;
+  }
+
+  button {
+    width: 100%;
+  }
+
+  .sources li {
+    padding: 12px;
+  }
+}

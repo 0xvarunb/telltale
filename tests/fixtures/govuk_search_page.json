@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "title": "Test vessel report alpha",
+      "link": "/maib-reports/test-vessel-report-alpha",
+      "public_timestamp": "2026-03-12T10:15:00.000+00:00"
+    },
+    {
+      "title": "Test vessel report bravo",
+      "link": "/maib-reports/test-vessel-report-bravo",
+      "public_timestamp": "2025-11-04T09:00:00.000+00:00"
+    },
+    {
+      "title": "Test vessel report charlie",
+      "link": "/maib-reports/test-vessel-report-charlie",
+      "public_timestamp": "2024-07-21T14:30:00.000+01:00"
+    }
+  ],
+  "total": 3,
+  "start": 0,
+  "facets": {},
+  "suggested_queries": [],
+  "es_cluster": "A"
+}

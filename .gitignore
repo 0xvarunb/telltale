@@ -1,0 +1,27 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Report data (never committed: PDFs, extracted text, stores, vectors)
+data/
+spikes/**/data/
+spikes/**/result-*.json
+
+# Private working notes (correspondence, content plans)
+docs/outreach/
+docs/linkedin/
+
+# Python
+.venv/
+spikes/**/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Tools
+.superpowers/
+.DS_Store
+
+# Report PDFs anywhere in the tree, not only under data/ (tests make theirs in a temp folder)
+*.pdf

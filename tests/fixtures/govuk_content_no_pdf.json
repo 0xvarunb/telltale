@@ -1,0 +1,15 @@
+{
+  "base_path": "/maib-reports/test-vessel-report-charlie",
+  "title": "Test vessel report charlie",
+  "document_type": "maib_report",
+  "schema_name": "specialist_document",
+  "public_updated_at": "2024-07-21T14:30:00.000+01:00",
+  "details": {
+    "body": "<p>Synthetic summary with no report file.</p>",
+    "metadata": {
+      "vessel_type": ["merchant-vessel-100-gross-tons-or-over", "fishing-vessel"],
+      "report_type": "investigation-report"
+    },
+    "attachments": []
+  }
+}

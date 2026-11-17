@@ -75,6 +75,23 @@ to the current folder.
    `data/departments.csv` with the words that placed each report, for checking. A report can be in
    more than one department; one whose title is too general stays unsorted.
 
+7. Make an answer card, a phone-sized image (1080 x 1350) for posts and comments:
+
+   ```
+   uv run telltale ask "QUESTION" --save data/results/answer.json --card data/results/answer.png
+   ```
+
+   The card shows the question, the sentences word for word with their source numbers or "no
+   source" mark, the sources they cite, and the cost. Choose sentences with `--sentences 1-4,7`.
+   To redraw from a saved answer without asking (or paying) again:
+
+   ```
+   uv run telltale card data/results/answer.json --out data/results/card.png --sentences 1-4
+   ```
+
+   The card fonts (EB Garamond and Geist) are bundled under the SIL Open Font License 1.1; the
+   licence texts are in `src/telltale/card_assets/`.
+
 Tests: `uv run pytest`. They make no network calls and need no API key.
 
 ## Data credit

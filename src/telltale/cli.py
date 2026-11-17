@@ -13,6 +13,7 @@ import httpx
 import uvicorn
 
 from telltale.answer import answer, is_no_answer, stop_notice
+from telltale import card as answer_card
 from telltale.departments import RULES, departments
 from telltale.http import describe
 from telltale.ingest.download import DownloadError, download_pdf
@@ -269,11 +270,18 @@ def _settings_with_key(command: str) -> Settings:
         ) from error
 
 
-def ask(question: str) -> None:
+def ask(
+    question: str,
+    save: Path | None = None,
+    card_out: Path | None = None,
+    sentences: str | None = None,
+) -> None:
     # The same checks as the page, before any key, index or model is touched.
     problem = question_problem(question)
     if problem is not None:
         raise CommandError(problem)
+    if sentences is not None and card_out is None:
+        raise CommandError("--sentences only applies with --card.")
     question = question.strip()
     settings = _settings_with_key("ask")
     index = load_index(settings.data_dir)
@@ -285,6 +293,34 @@ def ask(question: str) -> None:
     except anthropic.APIError as error:
         raise CommandError(f"The request to Claude failed: {error}") from error
     print_answer(result)
+    if save is not None:
+        save.parent.mkdir(parents=True, exist_ok=True)
+        save.write_text(answer_card.to_json(result), encoding="utf-8")
+        print(f"\nAnswer saved to {save}")
+    if card_out is not None:
+        make_card(result, card_out, sentences)
+
+
+def make_card(result: Answer, out: Path, sentences: str | None) -> None:
+    """Draw the answer card and say where it went."""
+    highest = sum(1 for line in answer_card.view(result).lines if line.number is not None)
+    try:
+        selection = answer_card.parse_selection(sentences, highest)
+        answer_card.render(result, out, selection)
+    except answer_card.CardError as error:
+        raise CommandError(str(error)) from error
+    print(f"Card saved to {out}")
+
+
+def card(saved: Path, out: Path, sentences: str | None) -> None:
+    """Redraw a card from an answer saved with `ask --save`, without asking again."""
+    try:
+        result = answer_card.from_json(saved.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise CommandError(f"Could not read {saved}: {error.strerror}") from error
+    except (ValueError, KeyError, TypeError) as error:
+        raise CommandError(f"{saved} is not an answer saved by `telltale ask --save`.") from error
+    make_card(result, out, sentences)
 
 
 def serve(host: str, port: int) -> None:
@@ -392,6 +428,20 @@ def _parser() -> argparse.ArgumentParser:
         "Needs ANTHROPIC_API_KEY and a finished `telltale ingest`.",
     )
     ask_parser.add_argument("question", help="the job the ship is about to do, in plain words")
+    ask_parser.add_argument("--save", type=Path, help="also save the answer as JSON, to redraw cards later")
+    ask_parser.add_argument("--card", type=Path, help="also draw the answer as a phone-sized PNG card")
+    ask_parser.add_argument(
+        "--sentences", help='with --card: which sentences to put on it, for example "1-4,7"'
+    )
+    card_parser = commands.add_parser(
+        "card",
+        help="draw an answer saved with `ask --save` as a phone-sized PNG card",
+        description="Redraw a card from a saved answer without asking again (no API key, no cost). "
+        "Every sentence is shown word for word with its source numbers or no-source mark.",
+    )
+    card_parser.add_argument("saved", type=Path, help="the JSON file written by `ask --save`")
+    card_parser.add_argument("--out", type=Path, required=True, help="where to write the PNG")
+    card_parser.add_argument("--sentences", help='which sentences to show, for example "1-4,7"')
     departments_parser = commands.add_parser(
         "departments",
         help="count the stored reports by shipboard department",
@@ -430,7 +480,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "ingest":
             ingest(load_settings(require_key=False).data_dir, args.limit)
         elif args.command == "ask":
-            ask(args.question)
+            ask(args.question, args.save, args.card, args.sentences)
+        elif args.command == "card":
+            card(args.saved, args.out, args.sentences)
         elif args.command == "departments":
             sort_by_department(load_settings(require_key=False).data_dir, args.list)
         else:

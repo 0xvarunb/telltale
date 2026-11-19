@@ -36,7 +36,7 @@
 
 ### Task 0 (Varun): API key
 
-- [ ] Create a project-only key in the Anthropic console with a $150 spend limit, and put it in `.env` at the repo root as `ANTHROPIC_API_KEY=...`. Until then, the GreenCrew key may be used (Varun agreed on 30 Oct for the spike). Never print it.
+- [ ] Create a project-only key in the Anthropic console with a $150 spend limit, and put it in `.env` at the repo root as `ANTHROPIC_API_KEY=...`. Never print it.
 
 ### Task 1: Repository and settings
 

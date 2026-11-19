@@ -9,7 +9,10 @@ MODEL = "claude-haiku-5-5"
 PRICE_IN, PRICE_OUT = 0.10 / 1e6, 0.50 / 1e6
 
 def load_key():
-    for line in pathlib.Path.home().joinpath("projects/greencrew/.env.local").read_text().splitlines():
+    import os
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return os.environ["ANTHROPIC_API_KEY"]
+    for line in pathlib.Path(__file__).resolve().parents[3].joinpath(".env").read_text().splitlines():
         if line.startswith("ANTHROPIC_API_KEY="):
             return line.split("=", 1)[1].strip().strip('"').strip("'")
     raise SystemExit("no key found")

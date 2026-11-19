@@ -22,7 +22,7 @@ Execution: subagent-driven, chosen by Varun 30 Oct 2026 ("we will use reviewer p
 
 Ruling 1: Task 1 skips `git init` and the docs commit; the implementer scaffolds with uv on the existing repo and keeps the controller's .gitignore (adding only what uv needs). — The repo already exists with the correct ignore list. — Cost if wrong: none; a duplicate init would fail harmlessly.
 Ruling 2: Task 6 implements `ingest` and `ask` only; `serve` is added in Task 7 alongside create_app. — Task 6 cannot serve a page that does not exist yet. — Cost if wrong: a one-line subcommand moves between tasks.
-Ruling 3: Until Varun creates the project key, .env holds the GreenCrew ANTHROPIC_API_KEY (copied by the controller without printing; Varun agreed 30 Oct). — Unblocks Task 6 real runs. — Cost if wrong: spend lands on the GreenCrew account (a few cents).
+Ruling 3: Until Varun creates a project key, .env holds an existing Anthropic API key of Varun's (copied by the controller without printing; Varun agreed 30 Oct). — Unblocks Task 6 real runs. — Cost if wrong: spend lands on another project's account (a few cents).
 Ruling 4: data paths are data/telltale.sqlite, data/pdf/, data/index/. — Plan says data_dir default `data/` but leaves file names open. — Cost if wrong: rename three paths.
 
 ## Tasks
@@ -43,7 +43,7 @@ Task 1: minor (deferred): .gitignore has no *.pdf glob outside data/
 Task 2: dispatched (base 01e8104, implementer ae00188fbeeeb81d7, opus)
 Task 2: implementer DONE (db6a113); concerns: content-call failure aborts listing; no sort order; one system python3 read of fixtures
 Task 2: review dispatched (reviewer a6a095a37a3310c85, opus)
-Ruling 6: Keep the GreenCrew ANTHROPIC_API_KEY in .env for Telltale (Varun 30 Oct: "keep using the greencrew api"). Supersedes the separate-key suggestion. — Cost if wrong: Telltale spend mixes with GreenCrew on one account.
+Ruling 6: Keep that existing key in .env for Telltale (Varun, 30 Oct). Supersedes the separate-key suggestion. — Cost if wrong: Telltale spend mixes with another project's on one account.
 Task 2: complete (commits 01e8104..db6a113, review clean)
 Task 2: minor (deferred): no retry/backoff over ~635 content calls; one 429/5xx/timeout aborts the listing (maib.py _get_json)
 Task 2: minor (deferred): httpx does not follow redirects by default; a redirecting content path aborts the listing

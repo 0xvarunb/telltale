@@ -34,6 +34,20 @@
           <p class="cost">{{ view.cost }}</p>
         </section>
 
+        {% if view.searched %}
+        <section class="searched" aria-labelledby="searched-heading">
+          <h2 id="searched-heading">Reports searched</h2>
+          <ol>
+            {% for entry in view.searched %}
+            <li>{% if entry.link %}<a href="{{ entry.link }}" target="_blank" rel="noopener">{{ entry.title }}</a>{% else %}{{ entry.title }}{% endif %}
+              {%- if entry.page is not none %}, page {{ entry.page }}{% endif %}</li>
+            {% endfor %}
+          </ol>
+          <p class="closing">{{ view.searched_closing }}</p>
+          <p class="credit">Crown copyright</p>
+        </section>
+        {% endif %}
+
         {% if view.sources %}
         <section class="sources" aria-labelledby="sources-heading">
           <h2 id="sources-heading">Sources</h2>

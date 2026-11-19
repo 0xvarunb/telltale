@@ -38,6 +38,11 @@ class Chunk:
     def source(self) -> str:
         return self.url if self.web_page else f"{self.url}#page={self.page}"
 
+    @property
+    def source_page(self) -> int | None:
+        """The PDF page number in `source`, or None for a GOV.UK page, which has none."""
+        return None if self.web_page else self.page
+
 
 @dataclass
 class Citation:

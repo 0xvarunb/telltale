@@ -54,12 +54,14 @@ def report(slug: str, pdf_url: str | None) -> ReportMeta:
     )
 
 
-def stub_answer(sentences: list[Sentence], stop_reason: str = "end_turn"):
+def stub_answer(
+    sentences: list[Sentence], stop_reason: str = "end_turn", chunks: list[Chunk] | None = None
+):
     def fake(question, index, client, model):
         return Answer(
             question=question,
             sentences=sentences,
-            chunks=[],
+            chunks=chunks or [],
             input_tokens=20_000,
             output_tokens=1_300,
             cost_usd=0.00265,
@@ -578,3 +580,118 @@ def test_ingest_reads_the_page_text_of_a_report_with_no_pdf(monkeypatch, tmp_pat
         "Synopsis The pilot over-corrected and the vessel grounded on the bank. Place on board: Hull"
     ]
     assert "Figure 1" not in " ".join(chunk.passages)
+
+
+# What was searched: shown on a no-answer result, and always saved with `--save`.
+
+SEARCHED_HEADING = "Reports searched (closest first):"
+SEARCHED_CLOSING = "These were searched and did not match the job. They are not an answer."
+
+
+def searched_chunk(id: int, letter: str, page: int, web_page: bool = False) -> Chunk:
+    url = (
+        f"https://www.gov.uk/maib-reports/test-report-{letter}"
+        if web_page
+        else f"https://assets.publishing.service.gov.uk/media/test/report-{letter}.pdf"
+    )
+    return Chunk(
+        id=id,
+        report_slug=f"test-report-{letter}",
+        report_title=f"Test report {letter}",
+        url=url,
+        page=page,
+        passages=[f"Passage {id}."],
+        web_page=web_page,
+    )
+
+
+# Seven chunks across six reports, in retrieval order; report a appears twice.
+SEARCHED = [
+    searched_chunk(1, "a", 3),
+    searched_chunk(2, "b", 7),
+    searched_chunk(3, "a", 9),
+    searched_chunk(4, "c", 1),
+    searched_chunk(5, "d", 2),
+    searched_chunk(6, "e", 5),
+    searched_chunk(7, "f", 8),
+]
+
+
+def test_ask_lists_the_reports_searched_when_there_is_no_answer(ask_offline, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli, "answer", stub_answer([Sentence(text=NO_ANSWER, citations=[])], chunks=SEARCHED)
+    )
+
+    assert cli.main(["ask", "opening up an auxiliary engine crankcase"]) == 0
+
+    out = capsys.readouterr().out
+    assert out.startswith(NO_ANSWER + "\n")
+    listed = out.split(SEARCHED_HEADING)[1].split(SEARCHED_CLOSING)[0]
+    entries = [line for line in listed.splitlines() if line.strip()]
+    pdf = "https://assets.publishing.service.gov.uk/media/test/report-{}.pdf#page={}"
+    assert entries == [
+        f"- Test report a, page 3: {pdf.format('a', 3)}",
+        f"- Test report b, page 7: {pdf.format('b', 7)}",
+        f"- Test report c, page 1: {pdf.format('c', 1)}",
+        f"- Test report d, page 2: {pdf.format('d', 2)}",
+        f"- Test report e, page 5: {pdf.format('e', 5)}",
+    ]
+    assert out.index(NO_ANSWER) < out.index(SEARCHED_HEADING) < out.index(SEARCHED_CLOSING)
+    assert SEARCHED_CLOSING + "\n" in out
+    assert "Test report f" not in out
+    assert "—" not in out
+
+
+def test_ask_lists_no_reports_searched_for_a_sourced_answer(ask_offline, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli, "answer", stub_answer([Sentence(text=SOURCED, citations=[CITATION])], chunks=SEARCHED)
+    )
+
+    cli.main(["ask", "entering a ballast tank"])
+
+    out = capsys.readouterr().out
+    assert SEARCHED_HEADING not in out
+    assert SEARCHED_CLOSING not in out
+
+
+@pytest.mark.parametrize(
+    "sentences",
+    [[Sentence(text=SOURCED, citations=[CITATION])], [Sentence(text=NO_ANSWER, citations=[])]],
+    ids=["sourced", "no-answer"],
+)
+def test_ask_save_records_every_chunk_searched(
+    ask_offline, monkeypatch, tmp_path: Path, capsys, sentences
+):
+    import json
+
+    chunks = [*SEARCHED, searched_chunk(8, "g", 1, web_page=True)]
+    monkeypatch.setattr(cli, "answer", stub_answer(sentences, chunks=chunks))
+    saved = tmp_path / "answer.json"
+
+    assert cli.main(["ask", "a question", "--save", str(saved)]) == 0
+
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    pdf = "https://assets.publishing.service.gov.uk/media/test/report-{}.pdf#page={}"
+    assert data["searched"] == [
+        {"report_title": "Test report a", "page": 3, "source": pdf.format("a", 3),
+         "report_slug": "test-report-a"},
+        {"report_title": "Test report b", "page": 7, "source": pdf.format("b", 7),
+         "report_slug": "test-report-b"},
+        {"report_title": "Test report a", "page": 9, "source": pdf.format("a", 9),
+         "report_slug": "test-report-a"},
+        {"report_title": "Test report c", "page": 1, "source": pdf.format("c", 1),
+         "report_slug": "test-report-c"},
+        {"report_title": "Test report d", "page": 2, "source": pdf.format("d", 2),
+         "report_slug": "test-report-d"},
+        {"report_title": "Test report e", "page": 5, "source": pdf.format("e", 5),
+         "report_slug": "test-report-e"},
+        {"report_title": "Test report f", "page": 8, "source": pdf.format("f", 8),
+         "report_slug": "test-report-f"},
+        # A GOV.UK page has no page numbers, so none is recorded.
+        {
+            "report_title": "Test report g",
+            "page": None,
+            "source": "https://www.gov.uk/maib-reports/test-report-g",
+            "report_slug": "test-report-g",
+        },
+    ]

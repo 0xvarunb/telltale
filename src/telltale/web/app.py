@@ -13,7 +13,13 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 from starlette.exceptions import HTTPException
 
-from telltale.answer import is_no_answer, stop_notice
+from telltale.answer import (
+    SEARCHED_CLOSING,
+    is_no_answer,
+    is_no_answer_result,
+    reports_searched,
+    stop_notice,
+)
 from telltale.models import Answer
 from telltale.question import EMPTY_QUESTION, TOO_LONG, question_problem
 
@@ -46,11 +52,22 @@ class SourceEntry:
 
 
 @dataclass
+class SearchedEntry:
+    """A report searched for a no-answer result: its title, page and link, nothing more."""
+
+    title: str
+    page: int | None
+    link: str | None
+
+
+@dataclass
 class View:
     lines: list[Line]
     sources: list[SourceEntry]
     notice: str | None
     cost: str
+    searched: list[SearchedEntry] = field(default_factory=list)
+    searched_closing: str = SEARCHED_CLOSING
 
 
 def _link(source: str) -> str | None:
@@ -60,7 +77,8 @@ def _link(source: str) -> str | None:
 
 def to_view(result: Answer) -> View:
     """Number the sources in order of first use (one number per PDF page), as the CLI does,
-    and list under each the passages actually cited, once each."""
+    and list under each the passages actually cited, once each. A no-answer result also lists
+    the first reports searched, as the CLI does."""
     notice, notice_only = stop_notice(result)
     lines: list[Line] = []
     entries: dict[str, SourceEntry] = {}
@@ -89,7 +107,17 @@ def to_view(result: Answer) -> View:
         f"Cost ${result.cost_usd:.4f} "
         f"({result.input_tokens:,} tokens in, {result.output_tokens:,} out)"
     )
-    return View(lines=lines, sources=list(entries.values()), notice=notice, cost=cost)
+    searched = [
+        SearchedEntry(title=chunk.report_title, page=chunk.source_page, link=_link(chunk.source))
+        for chunk in (reports_searched(result.chunks) if is_no_answer_result(result) else [])
+    ]
+    return View(
+        lines=lines,
+        sources=list(entries.values()),
+        notice=notice,
+        cost=cost,
+        searched=searched,
+    )
 
 
 def _same_origin(request: Request) -> bool:

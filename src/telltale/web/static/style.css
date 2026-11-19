@@ -306,6 +306,38 @@ blockquote {
   font-size: 13px;
 }
 
+/* Reports searched, shown with a no-answer result */
+
+.searched {
+  max-width: 720px;
+  padding: 14px 16px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--card);
+}
+
+.searched h2 {
+  font-size: 20px;
+  margin-bottom: 8px;
+}
+
+.searched ol {
+  margin: 0;
+  padding-left: 1.4em;
+}
+
+.searched li {
+  margin-bottom: 4px;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.searched .closing {
+  margin: 10px 0 0;
+  color: var(--ink-soft);
+  font-size: 15px;
+}
+
 /* Limits page */
 
 .limits {

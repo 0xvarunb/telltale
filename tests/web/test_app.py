@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from telltale.answer.brief import CUT_OFF, CUT_OFF_EMPTY, NO_ANSWER, REFUSED
-from telltale.models import Answer, Citation, Sentence
+from telltale.models import Answer, Chunk, Citation, Sentence
 from telltale.web import create_app
 
 HEADING = "What went wrong on other ships doing this job?"
@@ -58,11 +58,13 @@ SOURCED = "The bosun entered the ballast tank without a gas test."
 UNSOURCED = "Gas tests are always required before entry."
 
 
-def make_answer(sentences: list[Sentence], stop_reason: str = "end_turn") -> Answer:
+def make_answer(
+    sentences: list[Sentence], stop_reason: str = "end_turn", chunks: list[Chunk] | None = None
+) -> Answer:
     return Answer(
         question="entering a ballast tank",
         sentences=sentences,
-        chunks=[],
+        chunks=chunks or [],
         input_tokens=20_000,
         output_tokens=1_300,
         cost_usd=0.00265,
@@ -458,3 +460,68 @@ def test_a_no_answer_sentence_that_adds_a_claim_is_marked():
     assert mixed in html
     assert html.count('class="no-source"') == 1
     assert ">no source<" in html
+
+
+SEARCHED_CLOSING = "These were searched and did not match the job. They are not an answer."
+
+
+def searched_chunk(id: int, letter: str, page: int) -> Chunk:
+    return Chunk(
+        id=id,
+        report_slug=f"test-report-{letter}",
+        report_title=f"Test report {letter}",
+        url=f"https://assets.publishing.service.gov.uk/media/test/report-{letter}.pdf",
+        page=page,
+        passages=[f"Passage {id}."],
+    )
+
+
+# Seven chunks across six reports, in retrieval order; report a appears twice.
+SEARCHED = [
+    searched_chunk(1, "a", 3),
+    searched_chunk(2, "b", 7),
+    searched_chunk(3, "a", 9),
+    searched_chunk(4, "c", 1),
+    searched_chunk(5, "d", 2),
+    searched_chunk(6, "e", 5),
+    searched_chunk(7, "f", 8),
+]
+
+
+def searched_panel(html: str) -> str:
+    match = re.search(r'<section class="searched".*?</section>', html, re.DOTALL)
+    return match.group(0) if match else ""
+
+
+def test_no_answer_shows_the_reports_searched():
+    stub = StubAnswer(make_answer([Sentence(text=NO_ANSWER, citations=[])], chunks=SEARCHED))
+
+    html = client_for(stub).post("/ask", data={"question": "opening up a crankcase"}).text
+
+    panel = searched_panel(html)
+    assert ">Reports searched<" in panel
+    pdf = "https://assets.publishing.service.gov.uk/media/test/report-{}.pdf#page={}"
+    links = re.findall(r'<a href="([^"]+)"[^>]*>([^<]+)</a>', panel)
+    assert links == [
+        (pdf.format("a", 3), "Test report a"),
+        (pdf.format("b", 7), "Test report b"),
+        (pdf.format("c", 1), "Test report c"),
+        (pdf.format("d", 2), "Test report d"),
+        (pdf.format("e", 5), "Test report e"),
+    ]
+    assert "page 3" in panel
+    assert SEARCHED_CLOSING in panel
+    assert "Crown copyright" in panel
+    assert "Test report f" not in html
+    assert "Passage" not in html
+    assert "—" not in panel
+
+
+def test_a_sourced_answer_shows_no_reports_searched():
+    stub = StubAnswer(make_answer([Sentence(text=SOURCED, citations=[ALPHA])], chunks=SEARCHED))
+
+    html = client_for(stub).post("/ask", data={"question": "tank entry"}).text
+
+    assert searched_panel(html) == ""
+    assert "Reports searched" not in html
+    assert SEARCHED_CLOSING not in html

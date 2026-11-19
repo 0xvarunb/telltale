@@ -16,6 +16,9 @@ PRICE_OUTPUT_PER_MTOK = 0.50
 SEARCH_K = 8
 MIN_WORDS = 4
 NO_RESULTS = "no_results"
+# How many reports a no-answer result lists as searched.
+REPORTS_SEARCHED = 5
+SEARCHED_CLOSING = "These were searched and did not match the job. They are not an answer."
 
 # What the command line and the page say about how the model's reply ended.
 REFUSED = "The model declined to answer this question."
@@ -120,6 +123,28 @@ def is_no_answer(sentence: Sentence) -> bool:
         return False
     text = sentence.text.strip()
     return text == NO_ANSWER or _NO_ANSWER_WORDING.fullmatch(text) is not None
+
+
+def is_no_answer_result(result: Answer) -> bool:
+    """True when what is shown is only the no-answer sentence (or the model's wording of it).
+
+    Uses the same rules as the page and the command line: `stop_notice` for a reply shown as a
+    notice alone, and `is_no_answer` for each sentence.
+    """
+    _, notice_only = stop_notice(result)
+    return not notice_only and bool(result.sentences) and all(
+        is_no_answer(sentence) for sentence in result.sentences
+    )
+
+
+def reports_searched(chunks: list[Chunk], limit: int = REPORTS_SEARCHED) -> list[Chunk]:
+    """The first retrieved chunk of each report, in retrieval order, up to `limit` reports."""
+    first: dict[str, Chunk] = {}
+    for chunk in chunks:
+        if len(first) == limit:
+            break
+        first.setdefault(chunk.report_slug, chunk)
+    return list(first.values())
 
 
 def stop_notice(result: Answer) -> tuple[str | None, bool]:

@@ -12,7 +12,14 @@ import anthropic
 import httpx
 import uvicorn
 
-from telltale.answer import answer, is_no_answer, stop_notice
+from telltale.answer import (
+    SEARCHED_CLOSING,
+    answer,
+    is_no_answer,
+    is_no_answer_result,
+    reports_searched,
+    stop_notice,
+)
 from telltale import card as answer_card
 from telltale.departments import RULES, departments
 from telltale.http import describe
@@ -220,7 +227,10 @@ def load_index(data_dir: Path) -> HybridIndex:
 
 
 def print_answer(result: Answer) -> None:
-    """Numbered sentences (`[no source]` on unsourced ones), numbered sources, then the cost."""
+    """Numbered sentences (`[no source]` on unsourced ones), numbered sources, then the cost.
+
+    A no-answer result also lists the first reports searched, so it can be checked.
+    """
     numbers: dict[str, int] = {}
     titles: dict[str, str] = {}
     pages: dict[str, int | None] = {}
@@ -246,6 +256,13 @@ def print_answer(result: Answer) -> None:
             print(f"{n}. {sentence.text} {mark}")
         if notice:
             print(f"\n{notice}")
+        searched = reports_searched(result.chunks) if is_no_answer_result(result) else []
+        if searched:
+            print("\nReports searched (closest first):")
+            for chunk in searched:
+                where = f", page {chunk.source_page}" if chunk.source_page is not None else ""
+                print(f"- {chunk.report_title}{where}: {chunk.source}")
+            print(SEARCHED_CLOSING)
 
     if numbers:
         print("\nSources:")
@@ -301,12 +318,21 @@ def ask(
         make_card(result, card_out, sentences)
 
 
-def make_card(result: Answer, out: Path, sentences: str | None) -> None:
-    """Draw the answer card and say where it went."""
+def make_card(
+    result: Answer,
+    out: Path,
+    sentences: str | None,
+    searched: list[answer_card.Searched] | None = None,
+) -> None:
+    """Draw the answer card and say where it went.
+
+    `searched` is the reports searched from a saved answer; without it the card uses those of
+    `result.chunks`.
+    """
     highest = sum(1 for line in answer_card.view(result).lines if line.number is not None)
     try:
         selection = answer_card.parse_selection(sentences, highest)
-        answer_card.render(result, out, selection)
+        answer_card.render(result, out, selection, searched=searched)
     except answer_card.CardError as error:
         raise CommandError(str(error)) from error
     print(f"Card saved to {out}")
@@ -315,12 +341,14 @@ def make_card(result: Answer, out: Path, sentences: str | None) -> None:
 def card(saved: Path, out: Path, sentences: str | None) -> None:
     """Redraw a card from an answer saved with `ask --save`, without asking again."""
     try:
-        result = answer_card.from_json(saved.read_text(encoding="utf-8"))
+        text = saved.read_text(encoding="utf-8")
+        result = answer_card.from_json(text)
+        searched = answer_card.searched_from_json(text)
     except OSError as error:
         raise CommandError(f"Could not read {saved}: {error.strerror}") from error
     except (ValueError, KeyError, TypeError) as error:
         raise CommandError(f"{saved} is not an answer saved by `telltale ask --save`.") from error
-    make_card(result, out, sentences)
+    make_card(result, out, sentences, searched)
 
 
 def serve(host: str, port: int) -> None:

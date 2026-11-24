@@ -1,11 +1,15 @@
 """Command line: `telltale ingest` builds the store and search index; `telltale ask` answers;
-`telltale serve` runs the local web page."""
+`telltale serve` runs the local web page; `telltale eval` scores answers against the private
+question set; `telltale eval-report` rebuilds a run's report from its saved files."""
 
 import argparse
 import csv
+import json
 import logging
+import subprocess
 import sys
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 
 import anthropic
@@ -22,6 +26,16 @@ from telltale.answer import (
 )
 from telltale import card as answer_card
 from telltale.departments import RULES, departments
+from telltale.evals.judge import UnsupportedJudgeModel, judge_answer, require_judge_model
+from telltale.evals.questions import (
+    BlindQuestionError,
+    EvalQuestion,
+    QuestionFileError,
+    load_questions,
+    select,
+)
+from telltale.evals.report import REVIEW_FILE, ReportError, run_totals, write_report
+from telltale.evals.run import RUN_FILE, DirtyTreeError, RunHalted, run_eval
 from telltale.http import describe
 from telltale.ingest.download import DownloadError, download_pdf
 from telltale.ingest.extract import group_by_page, read_pages, to_passages
@@ -29,9 +43,10 @@ from telltale.ingest.ocr import LocalOcr, PageReader
 from telltale.ingest.store import Store
 from telltale.ingest.webpage import page_passages
 from telltale.models import Answer, ReportMeta
+from telltale.pricing import UnknownModelPrice, require_price
 from telltale.question import question_problem
 from telltale.search import EmbedderUnavailable, FastEmbedder, HybridIndex, SearchIndexError
-from telltale.settings import Settings, SettingsError, load_settings
+from telltale.settings import DEFAULT_JUDGE_MODEL, Settings, SettingsError, load_settings
 from telltale.sources.maib import ListingError, SkippedReport, list_merchant_reports
 from telltale.web import create_app
 
@@ -49,12 +64,34 @@ MODEL_OFFLINE = (
 )
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
+# The private eval question set, read from the working directory (the repo root).
+QUESTIONS_FILE = Path("docs/private/eval/questions.json")
+EVAL_RUNS_DIR = Path("eval") / "runs"
+FINAL_RUNS_LOG = Path("eval") / "final-runs.jsonl"
+DEFAULT_MAX_COST_USD = 1.00
+EVAL_STOPPED_BEFORE_START = "Stopped before the run started; nothing was asked."
+EVAL_STOPPED = (
+    "Stopped. Anything asked so far is saved in the run folder named above. A re-run starts a "
+    "new run."
+)
+EVAL_STOPPED_FINAL = (
+    "Stopped. Anything asked so far is saved in the run folder named above, and the run is "
+    "already in the final-run log. A re-run starts a new run."
+)
+EVAL_BATCH_STOPPED = (
+    "A batch already sent keeps running and is still charged; its id is in run.json."
+)
 
 logger = logging.getLogger(__name__)
 
 
 class CommandError(Exception):
     """A problem to report in a line or two, without a traceback."""
+
+
+class EvalStopped(Exception):
+    """`telltale eval` was stopped with Ctrl+C after its run began; the message says what is
+    saved."""
 
 
 def _groups(n: int) -> str:
@@ -370,6 +407,216 @@ def serve(host: str, port: int) -> None:
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
+def _git_state() -> tuple[str, bool]:
+    """The short commit hash and whether the tree has uncommitted changes.
+
+    Outside a git checkout the commit is "unknown" and the tree counts as dirty, so a final run
+    refuses rather than record results that belong to no commit.
+    """
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True, check=True
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown", True
+    return commit or "unknown", bool(status.strip())
+
+
+def _only(value: str | None) -> set[str] | None:
+    """The ids named by `--only`, or None when it was not given (None means every question)."""
+    if value is None:
+        return None
+    ids = {part.strip() for part in value.split(",") if part.strip()}
+    if not ids:
+        raise CommandError("--only needs at least one question id, for example --only Q1,Q2.")
+    return ids
+
+
+def _load_eval_questions(data_dir: Path) -> list[EvalQuestion]:
+    """Every question in the private question file, checked against the report store."""
+    if not QUESTIONS_FILE.is_file():
+        raise CommandError(
+            f"No eval question file at {QUESTIONS_FILE}. Put the private question set there "
+            "and run from the repo root."
+        )
+    store_path = data_dir / STORE_FILE
+    if not store_path.is_file():
+        raise CommandError(f"No report store at {store_path}. {RUN_INGEST}")
+    with Store(store_path) as store:
+        known_slugs = {meta.slug for meta in store.reports()}
+    return load_questions(QUESTIONS_FILE, known_slugs)
+
+
+def _write_run_report(run_dir: Path, questions: list[EvalQuestion]) -> None:
+    try:
+        report = write_report(run_dir, questions)
+    except ReportError as error:
+        raise CommandError(str(error)) from error
+    except OSError as error:
+        raise CommandError(f"Could not write the report: {error}") from error
+    print(f"Report written to {report}")
+    print(f"Judge review sheet: {run_dir / REVIEW_FILE}")
+
+
+def evaluate_report(run_dir: Path) -> None:
+    """Rebuild a run's report and judge review sheet from its saved files. No key, no cost."""
+    if not (run_dir / RUN_FILE).is_file():
+        raise CommandError(f"No {RUN_FILE} in {run_dir}; give a folder made by `telltale eval`.")
+    try:
+        questions = _load_eval_questions(load_settings(require_key=False).data_dir)
+    except QuestionFileError as error:
+        raise CommandError(str(error)) from error
+    _write_run_report(run_dir, questions)
+
+
+def evaluate(
+    final: bool,
+    only: str | None,
+    model: str | None,
+    judge_model: str,
+    max_cost: float,
+    batch: bool = False,
+) -> None:
+    """Ask the working (or with `final` the blind) questions, judge each answer and save the run.
+
+    With `batch`, the answers and then the judge calls go as two Message Batches, at half the
+    live price; the run waits for each to end.
+
+    Every refusal (a model with no price, no question file, an unknown or blind id, a dirty tree
+    for a final run) comes before the key, the search index or any model is touched.
+    """
+    settings = load_settings(require_key=False)
+    data_dir = settings.data_dir
+    answer_model = model or settings.model
+    try:
+        require_price(answer_model)
+        require_judge_model(judge_model)
+    except (UnknownModelPrice, UnsupportedJudgeModel) as error:
+        raise CommandError(str(error)) from error
+    try:
+        questions = select(_load_eval_questions(data_dir), final=final, only=_only(only))
+    except (QuestionFileError, BlindQuestionError) as error:
+        raise CommandError(str(error)) from error
+    if not questions:
+        kind = "blind" if final else "working"
+        raise CommandError(f"The question file has no {kind} questions to run.")
+    commit, dirty = _git_state()
+    if final and dirty:
+        raise CommandError(
+            "A final run needs every change committed first; the tree has uncommitted changes."
+        )
+
+    settings = _settings_with_key("eval")
+    index = load_index(settings.data_dir)
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    final_log = settings.data_dir / FINAL_RUNS_LOG
+    print(f"Asking {len(questions)} question(s) with {answer_model}, judged by {judge_model}.")
+    if batch:
+        print(
+            "Batch mode: the answers, then the judge calls, go as two batches at half the live "
+            "price. Each batch can take up to 24 hours."
+        )
+
+    progress = {"started": False, "batch_sent": False}
+
+    def started(run_dir: Path) -> None:
+        progress["started"] = True
+        if final:
+            print(f"Final run logged in {final_log}")
+        print(f"Saving the run to {run_dir}", flush=True)
+
+    def batch_sent(kind: str, batch_id: str) -> None:
+        progress["batch_sent"] = True
+        print(f"The {kind} batch {batch_id} is sent; waiting for it to end.", flush=True)
+
+    try:
+        _run_and_report(
+            questions, index, client, answer_model, judge_model, max_cost, final, commit, dirty,
+            final_log, batch, settings.data_dir / EVAL_RUNS_DIR, started, batch_sent,
+        )
+    except KeyboardInterrupt:
+        if not progress["started"]:
+            raise
+        lines = [EVAL_STOPPED_FINAL if final else EVAL_STOPPED]
+        if progress["batch_sent"]:
+            lines.append(EVAL_BATCH_STOPPED)
+        raise EvalStopped("\n".join(lines)) from None
+
+
+def _run_and_report(
+    questions: list[EvalQuestion],
+    index,
+    client,
+    answer_model: str,
+    judge_model: str,
+    max_cost: float,
+    final: bool,
+    commit: str,
+    dirty: bool,
+    final_log: Path,
+    batch: bool,
+    runs_dir: Path,
+    started: Callable[[Path], None],
+    batch_sent: Callable[[str, str], None],
+) -> None:
+    """The run itself, then its cost, unjudged count, errors and report."""
+    try:
+        run_dir = run_eval(
+            questions,
+            lambda text: answer(text, index, client, answer_model),
+            lambda saved: judge_answer(saved, client, judge_model),
+            runs_dir,
+            max_cost,
+            model=answer_model,
+            judge_model=judge_model,
+            final=final,
+            commit=commit,
+            dirty=dirty,
+            final_log=final_log,
+            on_start=started,
+            batch=batch,
+            index=index,
+            client=client,
+            on_batch=batch_sent,
+        )
+    except RunHalted as halted:
+        raise CommandError(f"{halted} The run so far is in {halted.run_dir}") from halted
+    except (DirtyTreeError, ValueError) as error:
+        raise CommandError(str(error)) from error
+    except OSError as error:
+        raise CommandError(f"Could not write the run: {error}") from error
+
+    meta = json.loads((run_dir / RUN_FILE).read_text(encoding="utf-8"))
+    spent = meta["answer_cost_usd"] + meta["judge_cost_usd"]
+    print(
+        f"Cost: ${spent:.4f} (answers ${meta['answer_cost_usd']:.4f}, "
+        f"judging ${meta['judge_cost_usd']:.4f})"
+    )
+    try:
+        run = run_totals(run_dir, questions)
+    except ReportError:
+        pass  # the report below says what is wrong with the run's files
+    else:
+        print(f"Unjudged: {run.unjudged} of {run.cited} cited sentences")
+    if meta["stopped_early"] and batch:
+        print(
+            f"Stopped early: the estimate for the next batch would pass the cost cap of "
+            f"${max_cost:.2f}, so it was not sent."
+        )
+    elif meta["stopped_early"]:
+        print(f"Stopped early: the cost cap of ${max_cost:.2f} was reached.")
+    for problem in meta["errors"]:
+        print(f"{problem['id']} failed: {problem['error']}")
+    print(f"Run saved to {run_dir}")
+    _write_run_report(run_dir, questions)
+    failed = {problem["id"] for problem in meta["errors"]}
+    if failed and set(meta["asked_ids"]) <= failed:
+        raise CommandError("Every question asked failed; nothing was scored.")
+
+
 def sort_by_department(data_dir: Path, show_list: bool) -> None:
     """Count the stored reports by department, from their titles, and write a CSV to check."""
     store_path = data_dir / STORE_FILE
@@ -430,6 +677,13 @@ def _port(value: str) -> int:
     number = int(value)
     if not 1 <= number <= 65535:
         raise argparse.ArgumentTypeError("must be between 1 and 65535")
+    return number
+
+
+def _money(value: str) -> float:
+    number = float(value)
+    if not number > 0:
+        raise argparse.ArgumentTypeError("must be more than 0")
     return number
 
 
@@ -498,6 +752,47 @@ def _parser() -> argparse.ArgumentParser:
     serve_parser.add_argument(
         "--port", type=_port, default=DEFAULT_PORT, help=f"port (default {DEFAULT_PORT})"
     )
+    eval_parser = commands.add_parser(
+        "eval",
+        help="ask the eval questions and judge every cited sentence",
+        description=f"Ask each question in {QUESTIONS_FILE} once, judge each cited sentence "
+        "against the passages it cites, and save the answers, verdicts and costs under "
+        "data/eval/runs/. Runs the working questions; --final runs the blind ones, needs a "
+        "committed tree and is logged. Needs ANTHROPIC_API_KEY and a finished `telltale ingest`.",
+    )
+    eval_parser.add_argument(
+        "--final", action="store_true", help="run the blind questions (committed tree only)"
+    )
+    eval_parser.add_argument("--only", help="run only these question ids, for example Q1,Q2")
+    eval_parser.add_argument("--model", help="the answering model (default: the ask model)")
+    eval_parser.add_argument(
+        "--judge-model",
+        default=DEFAULT_JUDGE_MODEL,
+        help=f"the judging model (default {DEFAULT_JUDGE_MODEL})",
+    )
+    eval_parser.add_argument(
+        "--max-cost",
+        type=_money,
+        default=DEFAULT_MAX_COST_USD,
+        metavar="USD",
+        help=f"stop before the next question once this much is spent "
+        f"(default {DEFAULT_MAX_COST_USD:.2f})",
+    )
+    eval_parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="send the answers, then the judge calls, as two batches at half the live price; "
+        "each can take up to 24 hours, and a batch is not sent if its estimated cost would "
+        "pass the cost cap",
+    )
+    report_parser = commands.add_parser(
+        "eval-report",
+        help="rebuild an eval run's report and judge review sheet",
+        description="Read a run folder written by `telltale eval` and write report.md and "
+        "judge-review.csv in it, from the saved answers and verdicts only. Needs the "
+        "question file and a finished `telltale ingest`; no API key, no cost.",
+    )
+    report_parser.add_argument("run_dir", type=Path, help="the run folder, under data/eval/runs/")
     return parser
 
 
@@ -513,12 +808,24 @@ def main(argv: list[str] | None = None) -> int:
             card(args.saved, args.out, args.sentences)
         elif args.command == "departments":
             sort_by_department(load_settings(require_key=False).data_dir, args.list)
+        elif args.command == "eval":
+            evaluate(
+                args.final, args.only, args.model, args.judge_model, args.max_cost, args.batch
+            )
+        elif args.command == "eval-report":
+            evaluate_report(args.run_dir)
         else:
             serve(args.host, args.port)
     except CommandError as error:
         print(error, file=sys.stderr)
         return 1
+    except EvalStopped as stopped:
+        print(stopped, file=sys.stderr)
+        return 130
     except KeyboardInterrupt:
-        print("Stopped. Re-run to carry on; nothing is downloaded twice.", file=sys.stderr)
+        if args.command == "eval":
+            print(EVAL_STOPPED_BEFORE_START, file=sys.stderr)
+        else:
+            print("Stopped. Re-run to carry on; nothing is downloaded twice.", file=sys.stderr)
         return 130
     return 0

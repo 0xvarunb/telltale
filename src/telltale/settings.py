@@ -7,6 +7,8 @@ from pathlib import Path
 DEFAULT_ENV_FILE = Path(".env")
 DEFAULT_DATA_DIR = Path("data")
 DEFAULT_MODEL = "claude-haiku-5-5"
+# The model that judges each cited sentence in an eval run.
+DEFAULT_JUDGE_MODEL = "claude-sonnet-5-5"
 KEY_NAME = "ANTHROPIC_API_KEY"
 
 

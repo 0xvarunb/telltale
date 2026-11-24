@@ -92,6 +92,30 @@ to the current folder.
    The card fonts (EB Garamond and Geist) are bundled under the SIL Open Font License 1.1; the
    licence texts are in `src/telltale/card_assets/`.
 
+8. Score it against a set of test questions (stage 2):
+
+   ```
+   uv run telltale eval --batch
+   ```
+
+   It asks each working question, then a second model (Claude Sonnet 5.5 unless you pass
+   `--judge-model`) reads every cited sentence against its passage and marks it supported, partly
+   or not supported. A sentence with no citation counts as not backed. No more questions are asked
+   once the run's cost reaches `--max-cost` (default $1.00). `--batch` sends the answers, then the
+   checks, as Message Batches at half the live price; each batch can take up to 24 hours.
+   `--only A3,A7` runs only those questions. Each run is saved under `data/eval/runs/`, with a
+   `report.md` and a review sheet of 30 checked sentences for a person to mark, so the checker is
+   itself checked before its numbers are quoted. To rebuild a run's report without asking again:
+
+   ```
+   uv run telltale eval-report data/eval/runs/RUN_FOLDER
+   ```
+
+   The question file (`docs/private/eval/questions.json`) is not in this repository. The 50
+   questions and their expected reports are kept private so the tool can't be tuned to them, and
+   17 of them are held back for one final run (`--final`). Without the file, `telltale eval` stops
+   before asking anything.
+
 Tests: `uv run pytest`. They make no network calls and need no API key.
 
 ## Data credit
@@ -120,12 +144,13 @@ Telltale is built in six stages, one AI skill per stage, each posted on LinkedIn
 | Stage | AI concept | In plain words | Where in the code | Post |
 | --- | --- | --- | --- | --- |
 | 1 | RAG (retrieval-augmented generation) | Find the matching report passages, then answer only from them | `src/telltale/search`, `src/telltale/answer` | Tue 24 Nov |
-| 2 | Evals | Score the tool against a set of questions with answers taken from the reports | coming | coming |
+| 2 | Evals | Score the tool against a set of questions with answers taken from the reports | `src/telltale/evals` | coming |
 | 3 | Guardrails | Enforce the rules, starting with rule 0: remove any sentence its passage does not support | coming | coming |
 | 4 | Agents | Add the port state control side and put together the job briefing and the safety meeting pack | coming | coming |
 | 5 | LLM ops | Trace every model call, with its cost and time, and re-run the evals on every change | coming | coming |
 | 6 | Fine-tuning | A small model that can run on board without a connection, compared on the evals | coming | coming |
 
 The concepts used so far are explained in plain English in [docs/concepts.md](docs/concepts.md).
-Stage 1 results: [docs/stage-1-results.md](docs/stage-1-results.md). Build log:
-[docs/build-log.md](docs/build-log.md).
+Stage 1 results: [docs/stage-1-results.md](docs/stage-1-results.md). Stage 2 plan:
+[docs/plans/2026-11-19-stage-2-evals.md](docs/plans/2026-11-19-stage-2-evals.md). Build log:
+https://telltale-log.vercel.app/ (early entries also in [docs/build-log.md](docs/build-log.md)).

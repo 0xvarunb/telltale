@@ -6,12 +6,9 @@ import anthropic
 
 from telltale.answer.prompt import NO_ANSWER, build_request
 from telltale.models import Answer, Chunk, Citation, Sentence
+from telltale.pricing import cost_usd, require_price
 from telltale.search import HybridIndex
 from telltale.text import sentence_spans
-
-# US dollars per million tokens (claude-haiku-5-5).
-PRICE_INPUT_PER_MTOK = 0.10
-PRICE_OUTPUT_PER_MTOK = 0.50
 
 SEARCH_K = 8
 MIN_WORDS = 4
@@ -35,12 +32,6 @@ _NO_ANSWER_WORDING = re.compile(
     r"in (?:these|the) reports(?: (?:for|about|on) (?:this|that|the) job)?\.?",
     re.IGNORECASE,
 )
-
-
-def cost_usd(input_tokens: int, output_tokens: int) -> float:
-    return (
-        input_tokens / 1e6 * PRICE_INPUT_PER_MTOK + output_tokens / 1e6 * PRICE_OUTPUT_PER_MTOK
-    )
 
 
 def _line_spans(text: str) -> list[tuple[int, int]]:
@@ -166,26 +157,28 @@ def _no_answer() -> Sentence:
     return Sentence(text=NO_ANSWER, citations=[])
 
 
-def answer(question: str, index: HybridIndex, client: anthropic.Anthropic, model: str) -> Answer:
-    """Search, ask the model with the passages as search results, and parse the cited answer.
+def no_results_answer(question: str) -> Answer:
+    """The answer when search found no passage: the no-answer sentence, with no model call."""
+    return Answer(
+        question=question,
+        sentences=[_no_answer()],
+        chunks=[],
+        input_tokens=0,
+        output_tokens=0,
+        cost_usd=0.0,
+        stop_reason=NO_RESULTS,
+    )
 
-    With no passages found the model is not called: the answer is a single unsourced sentence
-    saying there is no reliable answer, with stop_reason "no_results". A reply that leaves no
-    sentences gets the same sentence, with its real usage and stop_reason.
+
+def answer_from_response(
+    question: str, chunks: list[Chunk], response, *, model: str, batch: bool = False
+) -> Answer:
+    """The cited answer in the model's reply to `build_request(question, chunks, model)`.
+
+    A reply that leaves no sentences gets the no-answer sentence, with its real usage and
+    stop_reason. The cost is priced for `model`, at the batch price when `batch` is true. Both
+    `answer` and batch mode read replies here, so they parse them the same way.
     """
-    chunks = index.search(question, k=SEARCH_K)
-    if not chunks:
-        return Answer(
-            question=question,
-            sentences=[_no_answer()],
-            chunks=[],
-            input_tokens=0,
-            output_tokens=0,
-            cost_usd=0.0,
-            stop_reason=NO_RESULTS,
-        )
-
-    response = client.messages.create(**build_request(question, chunks, model))
     input_tokens = response.usage.input_tokens
     output_tokens = response.usage.output_tokens
     sentences = parse_sentences(response.content, chunks=chunks)
@@ -195,6 +188,23 @@ def answer(question: str, index: HybridIndex, client: anthropic.Anthropic, model
         chunks=chunks,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        cost_usd=cost_usd(input_tokens, output_tokens),
+        cost_usd=cost_usd(model, input_tokens, output_tokens, batch=batch),
         stop_reason=response.stop_reason or "",
     )
+
+
+def answer(question: str, index: HybridIndex, client: anthropic.Anthropic, model: str) -> Answer:
+    """Search, ask the model with the passages as search results, and parse the cited answer.
+
+    With no passages found the model is not called: the answer is a single unsourced sentence
+    saying there is no reliable answer, with stop_reason "no_results". A reply that leaves no
+    sentences gets the same sentence, with its real usage and stop_reason.
+
+    A model with no price is refused (`UnknownModelPrice`) before any search or call.
+    """
+    require_price(model)
+    chunks = index.search(question, k=SEARCH_K)
+    if not chunks:
+        return no_results_answer(question)
+    response = client.messages.create(**build_request(question, chunks, model))
+    return answer_from_response(question, chunks, response, model=model)

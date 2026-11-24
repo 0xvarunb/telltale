@@ -1,8 +1,13 @@
-# Test questions (stage 2, being collected)
+# Test questions
 
-Questions for the stage 2 test set, collected before it is built. Each gets the job, the ship type,
-the expected reports (chosen before the question is asked), and later a correct answer written from
-the reports. Some will be kept aside and never used for tuning.
+The stage 2 test set was written on 19 Nov 2026: 50 questions, each a job an officer would ask about
+before starting it, from the engine room, the deck, the bridge and cargo work. For 27 of them the
+reports that should come up were chosen before the question was asked; for 23 the right answer is
+that the reports don't cover the job. The set is kept private so the tool can't be tuned to it, and
+17 questions are held back for one final run at the end of the stage.
+
+The questions below came before the set: the three used to tune the stage 1 prompt (so none of them
+is a held-out question) and the first reader's question.
 
 | # | Question | From | Expected reports | Notes |
 | --- | --- | --- | --- | --- |

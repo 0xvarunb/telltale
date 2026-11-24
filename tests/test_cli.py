@@ -1,3 +1,4 @@
+import json
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -695,3 +696,398 @@ def test_ask_save_records_every_chunk_searched(
             "report_slug": "test-report-g",
         },
     ]
+
+
+# --- telltale eval --------------------------------------------------------------------------
+
+
+def _eval_questions(path: Path) -> None:
+    """A synthetic question file: one working question and one blind one."""
+    rows = [
+        {"id": "W1", "question": "Synthetic working question?", "expect": "reports",
+         "expected_reports": ["synthetic-alpha"], "related_reports": [], "blind": False},
+        {"id": "B1", "question": "Synthetic blind question?", "expect": "reports",
+         "expected_reports": ["synthetic-alpha"], "related_reports": [], "blind": True},
+    ]
+    path.write_text(json.dumps({"version": 1, "questions": rows}), encoding="utf-8")
+
+
+@pytest.fixture
+def eval_offline(monkeypatch, tmp_path: Path):
+    """`telltale eval` with a synthetic question file and store, a clean tree, and no index,
+    client or model: each of those records a call instead. Returns the call list."""
+    calls: list[str] = []
+    questions = tmp_path / "questions.json"
+    _eval_questions(questions)
+    with Store(tmp_path / cli.STORE_FILE) as store:
+        store.upsert_report(report("synthetic-alpha", PDF_URL))
+    settings = Settings(anthropic_api_key="test-key", data_dir=tmp_path)
+    monkeypatch.setattr(cli, "QUESTIONS_FILE", questions)
+    monkeypatch.setattr(cli, "load_settings", lambda *a, **k: settings)
+    monkeypatch.setattr(cli, "_git_state", lambda: ("abc1234", False))
+
+    def fake_index(data_dir):
+        calls.append("load_index")
+        return object()
+
+    def fake_client(**kwargs):
+        calls.append("client")
+        return object()
+
+    def fake_answer(question, index, client, model):
+        calls.append(f"answer:{question}")
+        return stub_answer([Sentence(text=SOURCED, citations=[CITATION])])(
+            question, index, client, model
+        )
+
+    def fake_judge(saved, client, model):
+        calls.append(f"judge:{model}")
+        return {}, [], 0.0
+
+    monkeypatch.setattr(cli, "load_index", fake_index)
+    monkeypatch.setattr(cli.anthropic, "Anthropic", fake_client)
+    monkeypatch.setattr(cli, "answer", fake_answer)
+    monkeypatch.setattr(cli, "judge_answer", fake_judge)
+    return calls
+
+
+def test_eval_without_final_refuses_a_blind_id_before_any_model_call(eval_offline, capsys):
+    assert cli.main(["eval", "--only", "B1"]) == 1
+    assert "B1 is a blind question" in capsys.readouterr().err
+    assert eval_offline == []
+
+
+def test_eval_final_refuses_a_dirty_tree_before_any_model_call(
+    eval_offline, monkeypatch, capsys
+):
+    monkeypatch.setattr(cli, "_git_state", lambda: ("abc1234", True))
+    assert cli.main(["eval", "--final"]) == 1
+    assert "uncommitted" in capsys.readouterr().err
+    assert eval_offline == []
+
+
+def test_eval_prints_the_run_directory(eval_offline, tmp_path: Path, capsys):
+    assert cli.main(["eval", "--judge-model", "claude-haiku-5-5"]) == 0
+
+    out = capsys.readouterr().out
+    runs = list((tmp_path / "eval" / "runs").iterdir())
+    assert len(runs) == 1
+    assert str(runs[0]) in out
+    # Only the working question is asked, with the judge model named on the command line.
+    assert eval_offline == [
+        "load_index", "client", "answer:Synthetic working question?", "judge:claude-haiku-5-5"
+    ]
+    meta = json.loads((runs[0] / "run.json").read_text(encoding="utf-8"))
+    assert meta["question_ids"] == ["W1"]
+    assert meta["commit"] == "abc1234"
+    assert not (tmp_path / "eval" / "final-runs.jsonl").exists()
+
+
+def test_eval_final_runs_the_blind_set_and_logs_it(eval_offline, tmp_path: Path):
+    assert cli.main(["eval", "--final"]) == 0
+
+    assert "answer:Synthetic blind question?" in eval_offline
+    assert "answer:Synthetic working question?" not in eval_offline
+    lines = (tmp_path / "eval" / "final-runs.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["commit"] == "abc1234"
+
+
+def test_eval_with_no_question_file_says_where_it_should_be(
+    eval_offline, monkeypatch, tmp_path: Path, capsys
+):
+    missing = tmp_path / "private" / "questions.json"
+    monkeypatch.setattr(cli, "QUESTIONS_FILE", missing)
+
+    assert cli.main(["eval"]) == 1
+    assert str(missing) in capsys.readouterr().err
+    assert eval_offline == []
+
+
+def test_eval_refuses_an_unknown_id(eval_offline, capsys):
+    assert cli.main(["eval", "--only", "W1,Z9"]) == 1
+    assert "Z9" in capsys.readouterr().err
+    assert eval_offline == []
+
+
+def test_eval_default_cost_cap_is_one_dollar():
+    args = cli._parser().parse_args(["eval"])
+    assert args.max_cost == 1.00
+    assert args.only is None
+
+
+@pytest.mark.parametrize("flag", ["--model", "--judge-model"])
+def test_eval_refuses_a_model_with_no_price_before_any_call(
+    eval_offline, monkeypatch, flag, capsys
+):
+    def no_key(command):
+        eval_offline.append("key")
+        raise AssertionError("the key must not be read")
+
+    monkeypatch.setattr(cli, "_settings_with_key", no_key)
+    assert cli.main(["eval", flag, "claude-unpriced-test"]) == 1
+    err = capsys.readouterr().err
+    assert "claude-unpriced-test" in err
+    assert "price" in err
+    assert eval_offline == []
+
+
+def test_eval_refuses_a_judge_model_with_no_thinking_off_setting_before_any_call(
+    eval_offline, monkeypatch, capsys
+):
+    from telltale.pricing import PRICES
+
+    monkeypatch.setitem(PRICES, "claude-unlisted-test", (1.0, 1.0))
+    monkeypatch.setattr(cli, "_settings_with_key", lambda command: eval_offline.append("key"))
+    assert cli.main(["eval", "--judge-model", "claude-unlisted-test"]) == 1
+    err = capsys.readouterr().err
+    assert "claude-unlisted-test" in err
+    assert "thinking" in err
+    assert eval_offline == []
+
+
+def test_eval_passes_the_chosen_models_to_answer_and_judge(eval_offline, monkeypatch, tmp_path):
+    seen: list[tuple[str, str]] = []
+    real_answer = cli.answer
+
+    def spy_answer(question, index, client, model):
+        seen.append(("answer", model))
+        return real_answer(question, index, client, model)
+
+    monkeypatch.setattr(cli, "answer", spy_answer)
+    assert cli.main(
+        ["eval", "--model", "claude-sonnet-5-5", "--judge-model", "claude-haiku-5-5"]
+    ) == 0
+    assert seen == [("answer", "claude-sonnet-5-5")]
+    assert "judge:claude-haiku-5-5" in eval_offline
+    (run_dir,) = (tmp_path / "eval" / "runs").iterdir()
+    meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert (meta["model"], meta["judge_model"]) == ("claude-sonnet-5-5", "claude-haiku-5-5")
+
+
+def test_eval_interrupted_says_where_the_run_is(eval_offline, monkeypatch, tmp_path, capsys):
+    def interrupted(question, index, client, model):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "answer", interrupted)
+    assert cli.main(["eval", "--final"]) == 130
+
+    captured = capsys.readouterr()
+    (run_dir,) = (tmp_path / "eval" / "runs").iterdir()
+    assert str(run_dir) in captured.out
+    assert "nothing is downloaded twice" not in captured.err
+    assert "Stopped" in captured.err
+    lines = (tmp_path / "eval" / "final-runs.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+
+
+def test_eval_batch_hands_the_index_and_client_to_a_batch_run(
+    eval_offline, monkeypatch, tmp_path: Path, capsys
+):
+    seen: dict = {}
+    real_run_eval = cli.run_eval
+    index = SimpleNamespace(search=lambda query, k: [])
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real_run_eval(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "run_eval", spy)
+    monkeypatch.setattr(cli, "load_index", lambda data_dir: index)
+    assert cli.main(["eval", "--batch"]) == 0
+
+    assert seen["batch"] is True
+    assert seen["index"] is index
+    assert seen["client"] is not None
+    # Batch mode never asks or judges one question at a time.
+    assert not [call for call in eval_offline if call.startswith(("answer:", "judge:"))]
+    out = capsys.readouterr().out
+    assert "Batch mode" in out
+    (run_dir,) = (tmp_path / "eval" / "runs").iterdir()
+    meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    # The one question found nothing, so no batch was needed.
+    assert (meta["answer_batch_id"], meta["judge_batch_id"]) == (None, None)
+    assert (run_dir / "report.md").is_file()
+
+
+def test_eval_without_batch_runs_live(eval_offline, monkeypatch):
+    seen: dict = {}
+    real_run_eval = cli.run_eval
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real_run_eval(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "run_eval", spy)
+    assert cli.main(["eval"]) == 0
+    assert seen["batch"] is False
+    assert "answer:Synthetic working question?" in eval_offline
+
+
+def test_eval_batch_interrupted_says_the_batch_keeps_running(
+    eval_offline, monkeypatch, tmp_path, capsys
+):
+    def interrupted(*args, **kwargs):
+        kwargs["on_start"](tmp_path)
+        kwargs["on_batch"]("answer", "msgbatch_test_1")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "run_eval", interrupted)
+    assert cli.main(["eval", "--batch"]) == 130
+    err = capsys.readouterr().err
+    assert "Stopped" in err
+    assert "keeps running and is still charged" in err
+
+
+def test_eval_interrupted_before_the_run_starts_says_nothing_was_asked(
+    eval_offline, monkeypatch, capsys
+):
+    def interrupted(data_dir):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "load_index", interrupted)
+    assert cli.main(["eval", "--final", "--batch"]) == 130
+    err = capsys.readouterr().err
+    assert "nothing was asked" in err
+    assert "log" not in err
+    assert "batch" not in err
+
+
+def test_eval_interrupted_working_run_does_not_claim_a_final_log(
+    eval_offline, monkeypatch, capsys
+):
+    def interrupted(question, index, client, model):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "answer", interrupted)
+    assert cli.main(["eval"]) == 130
+    err = capsys.readouterr().err
+    assert "saved in the run folder" in err
+    assert "log" not in err
+    # No batch was sent, so none is said to keep running.
+    assert "keeps running" not in err
+
+
+def test_eval_interrupted_final_run_says_it_is_in_the_log(eval_offline, monkeypatch, capsys):
+    def interrupted(question, index, client, model):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "answer", interrupted)
+    assert cli.main(["eval", "--final"]) == 130
+    assert "already in the final-run log" in capsys.readouterr().err
+
+
+def test_eval_prints_the_unjudged_count_after_the_cost(eval_offline, capsys):
+    # The fake judge gives no verdict, so the one cited sentence is unjudged.
+    assert cli.main(["eval"]) == 0
+    out = capsys.readouterr().out
+    assert "Unjudged: 1 of 1 cited sentences" in out
+    assert out.index("Cost: $") < out.index("Unjudged:")
+
+
+def test_eval_stops_with_one_line_when_the_api_refuses_a_request(
+    eval_offline, monkeypatch, tmp_path, capsys
+):
+    import anthropic
+    import httpx2
+
+    def refused(question, index, client, model):
+        response = httpx2.Response(
+            400, request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+        )
+        raise anthropic.BadRequestError("Synthetic bad request.", response=response, body=None)
+
+    monkeypatch.setattr(cli, "answer", refused)
+    assert cli.main(["eval"]) == 1
+    err = capsys.readouterr().err
+    (run_dir,) = (tmp_path / "eval" / "runs").iterdir()
+    [line] = err.strip().splitlines()
+    assert "BadRequestError" in line
+    assert str(run_dir) in line
+
+
+def test_eval_where_every_asked_question_failed_exits_non_zero(eval_offline, monkeypatch, capsys):
+    def broken(question, index, client, model):
+        raise RuntimeError("synthetic failure")
+
+    monkeypatch.setattr(cli, "answer", broken)
+    assert cli.main(["eval"]) == 1
+    captured = capsys.readouterr()
+    assert "W1 failed: RuntimeError: synthetic failure" in captured.out
+    assert "Every question asked failed" in captured.err
+
+
+# --- telltale eval-report -------------------------------------------------------------------
+
+
+def test_eval_writes_the_report_and_prints_its_path(eval_offline, tmp_path: Path, capsys):
+    assert cli.main(["eval"]) == 0
+
+    out = capsys.readouterr().out
+    (run_dir,) = (tmp_path / "eval" / "runs").iterdir()
+    assert (run_dir / "report.md").is_file()
+    assert (run_dir / "judge-review.csv").is_file()
+    assert str(run_dir / "report.md") in out
+
+
+def test_eval_writes_the_report_after_an_early_stop(eval_offline, monkeypatch, tmp_path: Path):
+    two = tmp_path / "two.json"
+    rows = [
+        {"id": f"W{n}", "question": f"Synthetic working question {n}?", "expect": "reports",
+         "expected_reports": ["synthetic-alpha"], "related_reports": [], "blind": False}
+        for n in (1, 2)
+    ]
+    two.write_text(json.dumps({"version": 1, "questions": rows}), encoding="utf-8")
+    monkeypatch.setattr(cli, "QUESTIONS_FILE", two)
+
+    # The first answer costs more than the cap, so the second question is never asked.
+    assert cli.main(["eval", "--max-cost", "0.001"]) == 0
+
+    (run_dir,) = (tmp_path / "eval" / "runs").iterdir()
+    text = (run_dir / "report.md").read_text(encoding="utf-8")
+    assert "Stopped early: yes" in text
+    assert "| not asked |" in text
+
+
+def test_eval_report_rebuilds_a_run_without_the_key_or_a_model(
+    eval_offline, monkeypatch, tmp_path: Path, capsys
+):
+    assert cli.main(["eval"]) == 0
+    (run_dir,) = (tmp_path / "eval" / "runs").iterdir()
+    before = (run_dir / "report.md").read_text(encoding="utf-8")
+    (run_dir / "report.md").unlink()
+    capsys.readouterr()
+    eval_offline.clear()
+
+    def no_key(command):
+        raise AssertionError("eval-report must not read the key")
+
+    monkeypatch.setattr(cli, "_settings_with_key", no_key)
+    assert cli.main(["eval-report", str(run_dir)]) == 0
+
+    assert eval_offline == []
+    assert (run_dir / "report.md").read_text(encoding="utf-8") == before
+    out = capsys.readouterr().out
+    assert str(run_dir / "report.md") in out
+    assert str(run_dir / "judge-review.csv") in out
+
+
+def test_eval_report_after_a_final_run_shows_no_blind_question_text(
+    eval_offline, tmp_path: Path
+):
+    assert cli.main(["eval", "--final"]) == 0
+    (run_dir,) = (tmp_path / "eval" / "runs").iterdir()
+
+    assert cli.main(["eval-report", str(run_dir)]) == 0
+
+    for name, encoding in (("report.md", "utf-8"), ("judge-review.csv", "utf-8-sig")):
+        assert "Synthetic blind question?" not in (run_dir / name).read_text(encoding=encoding)
+    assert "B1" in (run_dir / "report.md").read_text(encoding="utf-8")
+
+
+def test_eval_report_on_a_folder_with_no_run_says_so(eval_offline, tmp_path: Path, capsys):
+    empty = tmp_path / "not-a-run"
+    empty.mkdir()
+
+    assert cli.main(["eval-report", str(empty)]) == 1
+    assert "run.json" in capsys.readouterr().err

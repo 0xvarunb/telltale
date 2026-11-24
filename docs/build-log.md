@@ -3,6 +3,9 @@
 One dated entry per stage, newest first: what worked, what failed, measured numbers, what it
 cost. Only measured figures go here; anything not yet measured says so.
 
+From 4 Nov 2026 the log is kept on the build log page, https://telltale-log.vercel.app/ (source:
+`site/index.html`). This file keeps the entries from before then.
+
 ## 30 Oct 2026: stage 1 built and tested (measured figures owed)
 
 **Stage:** 1, RAG (find the matching report passages, then answer only from them).

@@ -6,8 +6,9 @@ import httpx2
 import pytest
 
 from telltale.answer import SYSTEM_PROMPT, answer, build_request, parse_sentences
-from telltale.answer.brief import NO_ANSWER, is_no_answer
+from telltale.answer.brief import NO_ANSWER, answer_from_response, is_no_answer
 from telltale.models import Chunk, Citation, Sentence
+from telltale.pricing import UnknownModelPrice
 
 MODEL = "claude-haiku-5-5"
 PDF_URL = "https://assets.publishing.service.gov.uk/media/test/report.pdf"
@@ -502,3 +503,63 @@ def test_prompt_targets_the_baseline_patterns():
         "Never explain a term, a piece of equipment or a procedure unless a result explains it",
     ):
         assert phrase in SYSTEM_PROMPT
+
+
+def test_cost_uses_the_price_of_the_model_asked():
+    client = FakeClient(
+        response([block("The crew entered the tank alone.", cite("x"))], 20_000, 1_300)
+    )
+
+    result = answer("tank entry", FakeIndex([chunk()]), client, "claude-sonnet-5-5")
+
+    # 20,000 input tokens at $2 per million plus 1,300 output tokens at $10 per million.
+    assert result.cost_usd == pytest.approx(0.053)
+
+
+def test_a_model_with_no_price_is_refused_before_any_search_or_call():
+    client = FakeClient(response([block("Unused.")]))
+    index = FakeIndex([chunk()])
+
+    with pytest.raises(UnknownModelPrice, match="claude-unpriced-test"):
+        answer("tank entry", index, client, "claude-unpriced-test")
+    assert client.messages.calls == []
+    assert index.queries == []
+
+
+def test_answer_and_answer_from_response_agree():
+    """`answer` parses its reply through `answer_from_response`, the path batch mode uses too."""
+    chunks = [chunk(1), chunk(2, page=5)]
+    reply = response(
+        [
+            block("Two crew collapsed in the unventilated tank.", cite("Two crew collapsed.")),
+            block(" The alarm was never raised on the deck."),
+        ],
+        input_tokens=1_000,
+        output_tokens=200,
+        stop_reason="max_tokens",
+    )
+
+    live = answer("Entering a ballast tank", FakeIndex(chunks), FakeClient(reply), MODEL)
+    parsed = answer_from_response("Entering a ballast tank", chunks, reply, model=MODEL)
+
+    assert parsed == live
+    assert parsed.cost_usd == pytest.approx(0.0002)
+
+
+def test_answer_from_response_at_the_batch_price_is_half():
+    reply = response([block("Two crew collapsed in the unventilated tank.")], 1_000, 200)
+
+    live = answer_from_response("Entering a tank", [chunk()], reply, model=MODEL)
+    batched = answer_from_response("Entering a tank", [chunk()], reply, model=MODEL, batch=True)
+
+    assert batched.cost_usd == pytest.approx(live.cost_usd / 2)
+    assert (batched.input_tokens, batched.output_tokens) == (1_000, 200)
+
+
+def test_answer_from_response_with_no_sentences_says_no_reliable_answer():
+    reply = response([], input_tokens=10, output_tokens=0, stop_reason="refusal")
+
+    result = answer_from_response("Entering a tank", [chunk()], reply, model=MODEL)
+
+    assert [s.text for s in result.sentences] == [NO_ANSWER]
+    assert result.stop_reason == "refusal"

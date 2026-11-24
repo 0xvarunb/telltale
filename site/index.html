@@ -70,12 +70,12 @@ td.res{color:var(--green)}
 .wrong li+li{margin-top:4px}
 /* The plan */
 ol.plan{margin:0;padding:0;list-style:none;border-top:2px solid var(--rule-strong)}
-ol.plan li{display:grid;grid-template-columns:2ch 9.5rem minmax(0,1fr) 3.5rem;gap:14px;align-items:baseline;padding:11px 0;border-bottom:1px solid var(--rule);font-size:15.5px}
+ol.plan li{display:grid;grid-template-columns:2ch 10.5rem minmax(0,1fr) 4.5rem;gap:14px;align-items:baseline;padding:11px 0;border-bottom:1px solid var(--rule);font-size:15.5px}
 .plan .n{font:500 14px var(--mono);color:var(--muted)}
 .plan .k{font-weight:600}
 .plan .s{font-size:14px;color:var(--muted);text-align:right}
 .plan .s.done{color:var(--green)}.plan .s.next{color:var(--orange)}
-@media (max-width:600px){ol.plan li{grid-template-columns:2ch minmax(0,1fr) 3.5rem}.plan .d{grid-column:2/4;grid-row:2;color:var(--muted)}}
+@media (max-width:600px){ol.plan li{grid-template-columns:2ch minmax(0,1fr) 4.5rem}.plan .d{grid-column:2/4;grid-row:2;color:var(--muted)}}
 footer{border-top:1px solid var(--rule);padding-top:16px;color:var(--muted);font-size:14px;display:flex;flex-direction:column;gap:4px}
 </style>
 </head>
@@ -112,6 +112,38 @@ footer{border-top:1px solid var(--rule);padding-top:16px;color:var(--muted);font
 
 <section aria-labelledby="log-h">
 <h2 id="log-h">Log</h2>
+
+<div class="day">
+<div class="dayhead"><time datetime="2026-11-19">19 Nov 2026</time><h3>A test set, and a checker</h3></div>
+<p class="intro">Stage 2 started: a way to measure the tool on questions I haven't tuned it on.</p>
+<table>
+<thead><tr><th scope="col">Change</th><th scope="col">Why</th><th scope="col">Result</th></tr></thead>
+<tbody>
+<tr><td>50 test questions</td><td data-l="Why">Three questions I tuned on can't tell me whether it works.</td><td class="res" data-l="Result">All jobs an officer would ask about before starting them, from the engine room, the deck, the bridge and cargo work. For 27, I know which reports should come up. For 23, the right answer is that the reports don't cover the job, and the tool should say so.</td></tr>
+<tr><td>17 kept aside</td><td data-l="Why">If I work on every question, the score flatters the tool.</td><td class="res" data-l="Result">The 17 are run once, at the end of the stage. The other 33 are the ones I work on.</td></tr>
+<tr><td>A second AI model checks each sentence</td><td data-l="Why">Checking every sentence of every answer by hand doesn't scale.</td><td data-l="Result">It reads each cited sentence against its passage and says whether the passage backs it fully, partly or not at all. A sentence with no citation counts as not backed.</td></tr>
+</tbody>
+</table>
+<div class="wrong"><b>Not measured yet</b><ul>
+<li>The first scores on the 33 working questions are in. I'm checking 30 of the checker's verdicts by hand first, and its numbers go on this page only if I agree with at least 27 of them.</li>
+</ul></div>
+</div>
+
+<div class="day">
+<div class="dayhead"><time datetime="2026-11-17">17 Nov 2026</time><h3>Answers on a web page</h3></div>
+<p class="intro">The lifeboat drill question again, asked twice on a web page that runs on the laptop.</p>
+<table>
+<thead><tr><th scope="col">Change</th><th scope="col">Why</th><th scope="col">Result</th></tr></thead>
+<tbody>
+<tr><td>A web page for asking questions</td><td data-l="Why">To read an answer next to the report passages it cites, the way an officer would use it.</td><td class="res" data-l="Result">Each answer shows the passages behind it, with the report and page for each one.</td></tr>
+<tr><td>Asked the same question twice</td><td data-l="Why">One run proves little, so I compared two.</td><td data-l="Result">First run: 25 sentences, 3 with no source, $0.0027. Second run: 28 sentences, 4 with no source, $0.0030.</td></tr>
+</tbody>
+</table>
+<div class="wrong"><b>Still wrong</b><ul>
+<li>Both runs said the crew took over from "the manufacturer's staff". The report only says crew members operated the equipment instead of "Schat-Davit BV representatives". The second run marked that sentence "no source". The first run put the same claim inside a sentence that cited the report, and nothing flagged it. A citation shows where a sentence came from, not that it's right.</li>
+<li>One sentence added a reason that the report gives elsewhere, but the passage it cited doesn't.</li>
+</ul></div>
+</div>
 
 <div class="day">
 <div class="dayhead"><time datetime="2026-11-06">6 Nov 2026</time><h3>The first real questions</h3></div>
@@ -162,8 +194,8 @@ footer{border-top:1px solid var(--rule);padding-top:16px;color:var(--muted);font
 <h2 id="plan-h">The plan</h2>
 <p class="muted" style="margin-bottom:14px">Six stages, one AI skill each. No dates until a stage is measured.</p>
 <ol class="plan">
-<li><span class="n">1</span><span class="k">Search</span><span class="d">Find the matching report passages and answer only from them</span><span class="s done">built</span></li>
-<li><span class="n">2</span><span class="k">Test set</span><span class="d">Questions with expected answers, from people who have done the jobs</span><span class="s next">next</span></li>
+<li><span class="n">1</span><span class="k">Search (RAG)</span><span class="d">Find the matching report passages and answer only from them</span><span class="s done">built</span></li>
+<li><span class="n">2</span><span class="k">Test set (evals)</span><span class="d">Questions with expected answers, from people who have done the jobs</span><span class="s next">started</span></li>
 <li><span class="n">3</span><span class="k">Guardrails</span><span class="d">Remove any sentence its passage doesn't support</span><span class="s">later</span></li>
 <li><span class="n">4</span><span class="k">Briefings</span><span class="d">Port state control findings, the job briefing and the safety meeting pack</span><span class="s">later</span></li>
 <li><span class="n">5</span><span class="k">Running costs</span><span class="d">Trace each answer's cost and time, and re-test on every change</span><span class="s">later</span></li>
@@ -173,7 +205,7 @@ footer{border-top:1px solid var(--rule);padding-top:16px;color:var(--muted);font
 </section>
 
 <footer>
-<p>Written by Varun Bhambri. Posts on LinkedIn on Tuesdays. Last updated 17 Nov 2026.</p>
+<p>Written by Varun Bhambri. Posts on LinkedIn on Tuesdays. Last updated 24 Nov 2026.</p>
 <p>Code: <a href="https://github.com/0xvarunb/telltale">github.com/0xvarunb/telltale</a> (MIT licence).</p>
 <p>Reports: UK Marine Accident Investigation Branch (MAIB), Crown copyright, used under the Open Government Licence v3.0.</p>
 </footer>

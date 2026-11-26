@@ -35,7 +35,7 @@ from telltale.evals.questions import (
     select,
 )
 from telltale.evals.report import REVIEW_FILE, ReportError, run_totals, write_report
-from telltale.evals.run import RUN_FILE, DirtyTreeError, RunHalted, run_eval
+from telltale.evals.run import RUN_FILE, DirtyTreeError, RunHalted, rejudge_run, run_eval
 from telltale.http import describe
 from telltale.ingest.download import DownloadError, download_pdf
 from telltale.ingest.extract import group_by_page, read_pages, to_passages
@@ -472,6 +472,77 @@ def evaluate_report(run_dir: Path) -> None:
     _write_run_report(run_dir, questions)
 
 
+def evaluate_rejudge(source_dir: Path, judge_model: str, max_cost: float) -> None:
+    """Judge a working run's saved answers again, as one batch, in a new run folder, then write
+    its report. No answer is asked again. Refusals come before the key is read."""
+    meta_path = source_dir / RUN_FILE
+    if not meta_path.is_file():
+        raise CommandError(
+            f"No {RUN_FILE} in {source_dir}; give a folder made by `telltale eval`."
+        )
+    try:
+        source_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as error:  # ValueError covers bad JSON and bad UTF-8
+        raise CommandError(f"The {RUN_FILE} in {source_dir} cannot be read: {error}") from error
+    if not isinstance(source_meta, dict) or "model" not in source_meta:
+        raise CommandError(f"The {RUN_FILE} in {source_dir} is not a run file.")
+    if source_meta.get("final"):
+        raise CommandError(
+            "That is a final run; its blind answers are judged once, so it is not re-judged."
+        )
+    try:
+        require_judge_model(judge_model)
+    except (UnknownModelPrice, UnsupportedJudgeModel) as error:
+        raise CommandError(str(error)) from error
+    data_dir = load_settings(require_key=False).data_dir
+    try:
+        questions = select(_load_eval_questions(data_dir), final=False)
+    except (QuestionFileError, BlindQuestionError) as error:
+        raise CommandError(str(error)) from error
+    commit, dirty = _git_state()
+
+    settings = _settings_with_key("eval-rejudge")
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    print(
+        f"Re-judging the saved answers in {source_dir} with {judge_model}, as one batch at "
+        "half the live price. No answer is asked again."
+    )
+    sent = {"batch": False}
+
+    def batch_sent(kind: str, batch_id: str) -> None:
+        sent["batch"] = True
+        print(f"The {kind} batch {batch_id} is sent; waiting for it to end.", flush=True)
+
+    try:
+        run_dir = rejudge_run(
+            source_dir, questions, settings.data_dir / EVAL_RUNS_DIR, client, max_cost,
+            judge_model=judge_model, commit=commit, dirty=dirty,
+            on_start=lambda d: print(f"Saving the re-judged run to {d}", flush=True),
+            on_batch=batch_sent,
+        )
+    except RunHalted as halted:
+        raise CommandError(f"{halted} The run so far is in {halted.run_dir}") from halted
+    except ValueError as error:
+        raise CommandError(str(error)) from error
+    except OSError as error:
+        raise CommandError(f"Could not write the run: {error}") from error
+    except KeyboardInterrupt:
+        lines = [EVAL_STOPPED] + ([EVAL_BATCH_STOPPED] if sent["batch"] else [])
+        raise EvalStopped("\n".join(lines)) from None
+
+    meta = json.loads((run_dir / RUN_FILE).read_text(encoding="utf-8"))
+    print(f"Cost: ${meta['judge_cost_usd']:.4f} (judging only)")
+    if meta["stopped_early"]:
+        print(
+            f"Stopped early: the estimate for the judge batch would pass the cost cap of "
+            f"${max_cost:.2f}, so it was not sent."
+        )
+    for problem in meta["errors"]:
+        print(f"{problem['id']} failed: {problem['error']}")
+    print(f"Run saved to {run_dir}")
+    _write_run_report(run_dir, questions)
+
+
 def evaluate(
     final: bool,
     only: str | None,
@@ -793,6 +864,30 @@ def _parser() -> argparse.ArgumentParser:
         "question file and a finished `telltale ingest`; no API key, no cost.",
     )
     report_parser.add_argument("run_dir", type=Path, help="the run folder, under data/eval/runs/")
+    rejudge_parser = commands.add_parser(
+        "eval-rejudge",
+        help="judge a working run's saved answers again, without asking again",
+        description="Copy the saved answers of a working run folder into a new run folder and "
+        "judge every cited sentence again, as one batch at half the live price, then write its "
+        "report and judge review sheet. No answer is asked again, and a final run is refused. "
+        "Needs ANTHROPIC_API_KEY.",
+    )
+    rejudge_parser.add_argument(
+        "run_dir", type=Path, help="the run folder to re-judge, under data/eval/runs/"
+    )
+    rejudge_parser.add_argument(
+        "--judge-model",
+        default=DEFAULT_JUDGE_MODEL,
+        help=f"the judging model (default {DEFAULT_JUDGE_MODEL})",
+    )
+    rejudge_parser.add_argument(
+        "--max-cost",
+        type=_money,
+        default=DEFAULT_MAX_COST_USD,
+        metavar="USD",
+        help="do not send the judge batch if its estimated cost would pass this "
+        f"(default {DEFAULT_MAX_COST_USD:.2f})",
+    )
     return parser
 
 
@@ -814,6 +909,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "eval-report":
             evaluate_report(args.run_dir)
+        elif args.command == "eval-rejudge":
+            evaluate_rejudge(args.run_dir, args.judge_model, args.max_cost)
         else:
             serve(args.host, args.port)
     except CommandError as error:
@@ -823,7 +920,7 @@ def main(argv: list[str] | None = None) -> int:
         print(stopped, file=sys.stderr)
         return 130
     except KeyboardInterrupt:
-        if args.command == "eval":
+        if args.command in ("eval", "eval-rejudge"):
             print(EVAL_STOPPED_BEFORE_START, file=sys.stderr)
         else:
             print("Stopped. Re-run to carry on; nothing is downloaded twice.", file=sys.stderr)

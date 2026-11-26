@@ -48,9 +48,13 @@ only in a picture is unknown to it.
 - It does not know about any accident that is not in those reports. It does not know your
   company's own incidents, fleet circulars, your SMS, the maker's manual or the regulations.
 - For each question it reads only the 8 best-matching groups of passages, each from one report
-  page. A relevant case outside those 8 can be missed.
+  page. A relevant case outside those 8 can be missed. On the stage 2 test questions, 25 of the 69
+  reports chosen in advance as the right ones were among those 8 (`docs/stage-2-results.md`).
 - When nothing fits, it says there is no reliable answer in these reports. That means only that
   the reports it found do not cover the job. It does not mean the job has no hazards.
+- It does not always say so when it should. On the stage 2 test questions, for 15 jobs the reports
+  don't cover, it said there was no reliable answer on 6. On the other 9 it offered cases from a
+  different job. Check that a case it gives is the same job as yours.
 
 ## In stage 1 it marks unsupported sentences but does not remove them
 
@@ -65,6 +69,10 @@ only in a picture is unknown to it.
   2026 (`docs/stage-1-results.md`). One of the earlier ones explained a piece of lifeboat
   equipment wrongly, from the model's own knowledge. The prompt was adjusted using these same
   questions, so on new questions the share may be higher.
+- Measured on 33 test questions in stage 2 (answers 19 Nov 2026, checked 26 Nov 2026): 131 of
+  539 sentences (24.3%) were not fully backed. 90 cited nothing, and of the cited ones a checker
+  model judged 40 only partly backed by their passage and 1 not backed at all. The checker's
+  verdicts were checked by hand: 28 of 30 agreed (`docs/stage-2-results.md`).
 - For comparison only: in the 30 Oct 2026 test on 21 MAIB reports, before this tool was built,
   21 of 60 fact sentences came back without a supporting passage.
 

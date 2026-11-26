@@ -1091,3 +1091,91 @@ def test_eval_report_on_a_folder_with_no_run_says_so(eval_offline, tmp_path: Pat
 
     assert cli.main(["eval-report", str(empty)]) == 1
     assert "run.json" in capsys.readouterr().err
+
+
+def test_eval_rejudge_judges_the_saved_answers_again_and_writes_a_report(
+    eval_offline, monkeypatch, tmp_path: Path, capsys
+):
+    assert cli.main(["eval"]) == 0
+    (source,) = (tmp_path / "eval" / "runs").iterdir()
+    eval_offline.clear()
+    capsys.readouterr()
+    seen: dict = {}
+
+    def fake_rejudge(source_dir, questions, out_dir, client, max_cost, **kw):
+        seen.update(source=source_dir, ids=[q.id for q in questions], out=out_dir,
+                    max_cost=max_cost, **kw)
+        return source_dir  # a finished run folder, so the report can be written
+
+    monkeypatch.setattr(cli, "rejudge_run", fake_rejudge)
+    (source / "report.md").unlink()
+    assert cli.main(["eval-rejudge", str(source)]) == 0
+
+    assert seen["source"] == source
+    assert "B1" not in seen["ids"]  # working questions only
+    assert seen["out"] == tmp_path / "eval" / "runs"
+    assert seen["max_cost"] == 1.00
+    assert seen["judge_model"] == cli.DEFAULT_JUDGE_MODEL
+    assert seen["commit"] == "abc1234"
+    # No answer is asked again.
+    assert not [call for call in eval_offline if call.startswith("answer:")]
+    assert (source / "report.md").is_file()
+    assert "Re-judging" in capsys.readouterr().out
+
+
+def test_eval_rejudge_on_a_folder_with_no_run_says_so_before_the_key(
+    eval_offline, monkeypatch, tmp_path: Path, capsys
+):
+    empty = tmp_path / "not-a-run"
+    empty.mkdir()
+
+    def no_key(command):
+        raise AssertionError("must refuse before reading the key")
+
+    monkeypatch.setattr(cli, "_settings_with_key", no_key)
+    assert cli.main(["eval-rejudge", str(empty)]) == 1
+    assert "run.json" in capsys.readouterr().err
+    assert eval_offline == []
+
+
+def test_eval_rejudge_refuses_a_final_run(eval_offline, tmp_path: Path, capsys):
+    assert cli.main(["eval", "--final"]) == 0
+    (source,) = (tmp_path / "eval" / "runs").iterdir()
+    capsys.readouterr()
+
+    assert cli.main(["eval-rejudge", str(source)]) == 1
+    assert "final run" in capsys.readouterr().err
+
+
+def test_eval_rejudge_on_an_unreadable_run_file_says_so(eval_offline, tmp_path: Path, capsys):
+    broken = tmp_path / "broken-run"
+    broken.mkdir()
+    (broken / "run.json").write_text("{not json", encoding="utf-8")
+
+    assert cli.main(["eval-rejudge", str(broken)]) == 1
+    assert "run.json" in capsys.readouterr().err
+
+
+def test_eval_rejudge_refuses_a_run_file_with_no_model_before_the_key(
+    eval_offline, monkeypatch, tmp_path: Path, capsys
+):
+    odd = tmp_path / "odd-run"
+    odd.mkdir()
+    (odd / "run.json").write_text('{"final": false}', encoding="utf-8")
+
+    def no_key(command):
+        raise AssertionError("must refuse before reading the key")
+
+    monkeypatch.setattr(cli, "_settings_with_key", no_key)
+    assert cli.main(["eval-rejudge", str(odd)]) == 1
+    assert "not a run file" in capsys.readouterr().err
+
+
+def test_eval_rejudge_on_a_run_file_that_is_not_utf8_says_so(eval_offline, tmp_path, capsys):
+    odd = tmp_path / "binary-run"
+    odd.mkdir()
+    (odd / "run.json").write_bytes(b"\xff\xfe\x00garbage")
+
+    assert cli.main(["eval-rejudge", str(odd)]) == 1
+    assert "run.json" in capsys.readouterr().err
+

@@ -324,7 +324,30 @@ def _run_batches(
             _halt_on_batch_errors(meta, "answer", failures, len(requests))
         _write_meta(run_dir, meta)
 
-    # Judge the saved answers, in question order.
+    _judge_in_batch(
+        questions, saved, run_dir, meta, max_cost_usd, client=client, judge_model=judge_model,
+        poll_seconds=poll_seconds, sleep=sleep, created=created, failed=failed,
+    )
+
+
+def _judge_in_batch(
+    questions: list[EvalQuestion],
+    saved: dict[str, dict],
+    run_dir: Path,
+    meta: dict,
+    max_cost_usd: float,
+    *,
+    client,
+    judge_model: str,
+    poll_seconds: float,
+    sleep: Callable[[float], None],
+    created: Callable[[str, str], None],
+    failed: Callable[[str, Exception], None],
+) -> None:
+    """Judge the saved answers, in question order, as one batch, and write their judge files.
+
+    The batch is not sent if the cost so far plus its estimate passes `max_cost_usd`.
+    """
     to_judge: dict[str, list[int]] = {}
     judge_batch: list[dict] = []
     for question in questions:
@@ -371,6 +394,114 @@ def _run_batches(
         except Exception as error:  # as in a live run, a judge error keeps the answer
             failed(id_, error)
     _halt_on_batch_errors(meta, "judge", failures, len(judge_batch))
+
+
+REJUDGED_SUFFIX = "rejudged"
+
+
+def rejudge_run(
+    source_dir: Path,
+    questions: list[EvalQuestion],
+    out_dir: Path,
+    client,
+    max_cost_usd: float,
+    *,
+    judge_model: str,
+    commit: str,
+    dirty: bool,
+    on_start: Callable[[Path], None] | None = None,
+    poll_seconds: float = DEFAULT_POLL_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    on_batch: Callable[[str, str], None] | None = None,
+) -> Path:
+    """Judge a run's saved answers again, as one batch, in a new run directory; return it.
+
+    No answer is asked again: each answer of `questions` saved in `source_dir` is copied as it
+    is, then every cited sentence is judged with `judge_model`. The new `run.json` names the
+    source run in `rejudged_from`, keeps its answering model, and counts no answer cost. The
+    source run is not changed. A final run is refused, so the blind answers are judged once.
+    """
+    source_meta_path = source_dir / RUN_FILE
+    if not source_meta_path.is_file():
+        raise ValueError(f"No {RUN_FILE} in {source_dir}; give a folder made by `telltale eval`.")
+    try:
+        source_meta = json.loads(source_meta_path.read_text(encoding="utf-8"))
+        model = source_meta["model"]
+    except (ValueError, KeyError, TypeError) as error:  # ValueError: bad JSON or bad UTF-8
+        raise ValueError(
+            f"The {RUN_FILE} in {source_dir} cannot be read as a run ({error!r})."
+        ) from error
+    if source_meta.get("final"):
+        raise ValueError(
+            "That is a final run; its blind answers are judged once, so it is not re-judged."
+        )
+    require_judge_model(judge_model)
+
+    # The source run's own selection, so its report reads the same; only questions given.
+    chosen = set(source_meta.get("question_ids") or [q.id for q in questions])
+    questions = [question for question in questions if question.id in chosen]
+    source_asked = set(
+        source_meta["asked_ids"] if "asked_ids" in source_meta else [q.id for q in questions]
+    )
+    started = datetime.now().astimezone()
+    run_dir = _new_run_dir(
+        out_dir, f"{started:%Y%m%d-%H%M}-{commit[:7]}-{model}-{REJUDGED_SUFFIX}"
+    )
+    (run_dir / ANSWERS_DIR).mkdir()
+    (run_dir / JUDGE_DIR).mkdir()
+    ids = {question.id for question in questions}
+    meta = {
+        "started": started.isoformat(timespec="seconds"),
+        "commit": commit,
+        "dirty": dirty,
+        "model": model,
+        "judge_model": judge_model,
+        "final": False,
+        "question_ids": [question.id for question in questions],
+        "asked_ids": [question.id for question in questions if question.id in source_asked],
+        "answer_cost_usd": 0.0,
+        "judge_cost_usd": 0.0,
+        "stopped_early": False,
+        "errors": [e for e in source_meta.get("errors") or [] if e.get("id") in ids],
+        "answer_batch_id": None,
+        "judge_batch_id": None,
+        "stop_reason": None,
+        "rejudged_from": source_dir.name,
+        "answer_commit": source_meta.get("commit"),
+        "answer_dirty": source_meta.get("dirty"),
+    }
+    _write_meta(run_dir, meta)
+    if on_start is not None:
+        on_start(run_dir)
+    saved: dict[str, dict] = {}
+    for question in questions:
+        path = source_dir / ANSWERS_DIR / f"{question.id}.json"
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            (run_dir / ANSWERS_DIR / f"{question.id}.json").write_text(text, encoding="utf-8")
+            saved[question.id] = json.loads(text)
+
+    def failed(id_: str, error: Exception) -> None:
+        meta["errors"].append({"id": id_, "error": f"{type(error).__name__}: {error}"})
+
+    def created(kind: str, batch_id: str) -> None:
+        meta[f"{kind}_batch_id"] = batch_id
+        _write_meta(run_dir, meta)
+        if on_batch is not None:
+            on_batch(kind, batch_id)
+
+    try:
+        _judge_in_batch(
+            questions, saved, run_dir, meta, max_cost_usd, client=client,
+            judge_model=judge_model, poll_seconds=poll_seconds, sleep=sleep, created=created,
+            failed=failed,
+        )
+    except RunHalted as halted:
+        halted.run_dir = run_dir
+        raise
+    finally:
+        _write_meta(run_dir, meta)
+    return run_dir
 
 
 def _stop(meta: dict, reason: str) -> None:

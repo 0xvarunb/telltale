@@ -19,6 +19,7 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 
+from telltale.ingest.store import OCR_NOTE
 from telltale.answer.brief import SEARCH_K
 from telltale.evals.questions import EvalQuestion
 from telltale.evals.run import ANSWERS_DIR, JUDGE_DIR, RUN_FILE
@@ -196,6 +197,11 @@ def _markdown(
         "",
         f"- Started: {meta['started']}",
         f"- Commit: {meta['commit']}" + (" (with uncommitted changes)" if meta["dirty"] else ""),
+        *(
+            [f"- Re-judged from: {meta['rejudged_from']} (answers from commit "
+             f"{meta.get('answer_commit')})"]
+            if meta.get("rejudged_from") else []
+        ),
         f"- Answering model: {meta['model']}",
         f"- Judge model: {meta['judge_model']}",
         f"- Final run: {_yes(meta['final'])}",
@@ -300,7 +306,11 @@ def _write_review(path: Path, answered: list[_Saved]) -> None:
         writer.writerow(REVIEW_COLUMNS)
         for saved, index in _sample(working):
             raw = saved.answer["sentences"][index]
-            passages = list(dict.fromkeys(c["cited_text"] for c in raw["citations"]))
+            # Each passage under its report title, as the judge sees it.
+            passages = list(dict.fromkeys(
+                f"Report title: {c['report_title'].removesuffix(OCR_NOTE)}\n{c['cited_text']}"
+                for c in raw["citations"]
+            ))
             writer.writerow(
                 [
                     saved.question.id,

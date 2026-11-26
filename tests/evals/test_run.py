@@ -13,7 +13,7 @@ from telltale.answer import answer, build_request
 from telltale.evals.judge import UnsupportedJudgeModel, build_judge_request, judge_answer
 from telltale.evals.questions import EvalQuestion
 from telltale.evals.report import write_report
-from telltale.evals.run import DirtyTreeError, RunHalted, log_final_run, run_eval
+from telltale.evals.run import DirtyTreeError, RunHalted, log_final_run, rejudge_run, run_eval
 from telltale.models import Answer, Chunk, Citation, Sentence
 from telltale.pricing import PRICES, UnknownModelPrice
 
@@ -588,7 +588,8 @@ def test_batch_run_saves_the_same_files_as_a_live_run(tmp_path: Path):
     assert answers[0]["params"] == build_request("Synthetic question Q1?", [CHUNK], BATCH_MODEL)
     assert [r["custom_id"] for r in judging] == ["Q1-0", "Q2-0"]
     assert judging[0]["params"] == build_judge_request(
-        "A synthetic fact about the job.", ["A synthetic passage about the job."], BATCH_JUDGE
+        "A synthetic fact about the job.",
+        [("Synthetic report A", "A synthetic passage about the job.")], BATCH_JUDGE
     )
     # Each batch was polled until it ended, with the injected sleep.
     assert sleeps == [POLL_SECONDS] * 4
@@ -736,7 +737,8 @@ def test_judge_batch_within_the_cost_cap_is_sent(tmp_path: Path):
     answers = estimate(build_request("Synthetic question Q1?", [CHUNK], BATCH_MODEL), BATCH_MODEL)
     judging = estimate(
         build_judge_request(
-            "A synthetic fact about the job.", ["A synthetic passage about the job."], BATCH_JUDGE
+            "A synthetic fact about the job.",
+        [("Synthetic report A", "A synthetic passage about the job.")], BATCH_JUDGE
         ),
         BATCH_JUDGE,
     )
@@ -997,3 +999,143 @@ def test_batch_run_through_the_real_sdk_without_network(tmp_path: Path):
     assert meta["errors"] == []
     assert meta["answer_cost_usd"] == pytest.approx(0.000625)
     assert meta["judge_cost_usd"] == pytest.approx(0.0015)
+
+
+# --- re-judging a run's saved answers -------------------------------------------------------
+
+
+def rejudge(source: Path, questions, tmp_path: Path, client, *, max_cost: float = 1.0, **kw):
+    options = {"judge_model": BATCH_JUDGE, "commit": "fff9999aaa", "dirty": False}
+    options.update(kw)
+    return rejudge_run(
+        source, questions, tmp_path / "rejudged", client, max_cost,
+        poll_seconds=POLL_SECONDS, sleep=[].append, **options,
+    )
+
+
+def test_rejudge_sends_only_a_judge_batch_and_keeps_the_answers(tmp_path: Path):
+    questions = [question("Q1"), question("Q2")]
+    source = run_batch(questions, tmp_path, FakeBatchClient())
+    client = FakeBatchClient()
+
+    run_dir = rejudge(source, questions, tmp_path, client)
+
+    # No answer is asked again: the only batch is the judge batch.
+    [judging] = client.batches.created
+    assert [r["custom_id"] for r in judging] == ["Q1-0", "Q2-0"]
+    assert judging[0]["params"] == build_judge_request(
+        "A synthetic fact about the job.",
+        [("Synthetic report A", "A synthetic passage about the job.")], BATCH_JUDGE,
+    )
+    for id_ in ("Q1", "Q2"):
+        assert (run_dir / "answers" / f"{id_}.json").read_bytes() == (
+            source / "answers" / f"{id_}.json"
+        ).read_bytes()
+        assert read(run_dir / "judge" / f"{id_}.json")[0]["verdict"] == "supported"
+    meta = read(run_dir / "run.json")
+    assert meta["rejudged_from"] == source.name
+    assert meta["model"] == BATCH_MODEL
+    assert meta["judge_model"] == BATCH_JUDGE
+    assert meta["commit"] == "fff9999aaa"
+    # The answers' own commit is kept, and the report says where they came from.
+    assert meta["answer_commit"] == COMMIT
+    assert meta["answer_dirty"] is False
+    assert meta["answer_cost_usd"] == 0.0
+    assert meta["judge_cost_usd"] > 0
+    assert meta["asked_ids"] == ["Q1", "Q2"]
+    assert meta["judge_batch_id"] == "msgbatch_test_1"
+    assert run_dir.name.endswith("-rejudged")
+    # The source run is left as it was.
+    assert read(source / "run.json")["judge_batch_id"] == "msgbatch_test_2"
+    # The report reads a re-judged run like any other, and names the source run.
+    report = write_report(run_dir, questions).read_text(encoding="utf-8")
+    assert f"Re-judged from: {source.name} (answers from commit {COMMIT})" in report
+
+
+def test_rejudge_only_takes_the_questions_given(tmp_path: Path):
+    questions = [question("Q1"), question("Q2")]
+    source = run_batch(questions, tmp_path, FakeBatchClient())
+    client = FakeBatchClient()
+
+    run_dir = rejudge(source, [question("Q2")], tmp_path, client)
+
+    [judging] = client.batches.created
+    assert [r["custom_id"] for r in judging] == ["Q2-0"]
+    assert [p.name for p in (run_dir / "answers").iterdir()] == ["Q2.json"]
+
+
+def test_rejudge_refuses_a_final_run(tmp_path: Path):
+    blind = [question("B1", blind=True)]
+    source = run_batch(blind, tmp_path, FakeBatchClient(), final=True)
+    client = FakeBatchClient()
+
+    with pytest.raises(ValueError, match="final run"):
+        rejudge(source, blind, tmp_path, client)
+    assert client.batches.created == []
+
+
+def test_rejudge_refuses_a_folder_with_no_run(tmp_path: Path):
+    with pytest.raises(ValueError, match="run.json"):
+        rejudge(tmp_path, [question("Q1")], tmp_path, FakeBatchClient())
+
+
+def test_rejudge_over_the_cost_cap_sends_nothing(tmp_path: Path):
+    questions = [question("Q1")]
+    source = run_batch(questions, tmp_path, FakeBatchClient())
+    client = FakeBatchClient()
+
+    run_dir = rejudge(source, questions, tmp_path, client, max_cost=0.000001)
+
+    assert client.batches.created == []
+    meta = read(run_dir / "run.json")
+    assert meta["stopped_early"] is True
+    assert meta["stop_reason"] == "batch_estimate"
+
+
+def test_rejudge_keeps_the_source_runs_selection_and_answer_errors(tmp_path: Path):
+    questions = [question("Q1"), question("Q2"), question("Q3")]
+    source = run_batch(questions, tmp_path, FakeBatchClient(), )
+    meta_path = source / "run.json"
+    meta = read(meta_path)
+    # As if the source run was `--only Q1,Q2` and Q2's answer failed.
+    meta["question_ids"] = ["Q1", "Q2"]
+    meta["errors"] = [{"id": "Q2", "error": "RuntimeError: synthetic failure"}]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    (source / "answers" / "Q2.json").unlink()
+    client = FakeBatchClient()
+
+    run_dir = rejudge(source, questions, tmp_path, client)
+
+    rejudged = read(run_dir / "run.json")
+    assert rejudged["question_ids"] == ["Q1", "Q2"]
+    assert rejudged["asked_ids"] == ["Q1", "Q2"]
+    assert rejudged["errors"] == [{"id": "Q2", "error": "RuntimeError: synthetic failure"}]
+    [judging] = client.batches.created
+    assert [r["custom_id"] for r in judging] == ["Q1-0"]
+
+
+def test_rejudge_refuses_an_unreadable_run_file(tmp_path: Path):
+    (tmp_path / "run.json").write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="run.json"):
+        rejudge(tmp_path, [question("Q1")], tmp_path, FakeBatchClient())
+
+
+def test_rejudge_refuses_a_run_file_with_no_model(tmp_path: Path):
+    (tmp_path / "run.json").write_text(json.dumps({"final": False}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="run.json"):
+        rejudge(tmp_path, [question("Q1")], tmp_path, FakeBatchClient())
+
+
+def test_rejudge_keeps_an_empty_asked_list(tmp_path: Path):
+    questions = [question("Q1")]
+    source = run_batch(questions, tmp_path, FakeBatchClient())
+    meta = read(source / "run.json")
+    meta["asked_ids"] = []
+    (source / "run.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    run_dir = rejudge(source, questions, tmp_path, FakeBatchClient())
+
+    assert read(run_dir / "run.json")["asked_ids"] == []
+

@@ -99,10 +99,10 @@ footer{border-top:1px solid var(--rule);padding-top:16px;color:var(--muted);font
 <h2 id="readings-h">Readings</h2>
 <div class="readings">
 <div class="reading"><div class="num">619</div><div class="what">MAIB reports on merchant ships, all searchable</div><div class="was">was 21 on 30 Oct</div></div>
-<div class="reading"><div class="num o">23%</div><div class="what">of sentences had no source, on 3 test questions</div><div class="was">was 34%</div></div>
+<div class="reading"><div class="num o">24%</div><div class="what">of sentences not fully backed by their passage, on 33 test questions</div><div class="was">was 23% with no source, on 3</div></div>
 <div class="reading"><div class="num g">$0.0022</div><div class="what">average cost of one answer, in US dollars</div><div class="was">was $0.0026</div></div>
 </div>
-<p class="caption">Measured 6 Nov 2026. Every number on this page was measured; anything not yet measured says so.</p>
+<p class="caption">Reports and cost measured 6 Nov 2026, sentences 26 Nov 2026. Every number on this page was measured; anything not yet measured says so.</p>
 </section>
 
 <section aria-labelledby="work-h">
@@ -112,6 +112,24 @@ footer{border-top:1px solid var(--rule);padding-top:16px;color:var(--muted);font
 
 <section aria-labelledby="log-h">
 <h2 id="log-h">Log</h2>
+
+<div class="day">
+<div class="dayhead"><time datetime="2026-11-26">26 Nov 2026</time><h3>First scores, and checking the checker</h3></div>
+<p class="intro">The 33 working questions, answered on 19 Nov and judged again on 26 Nov after a fix to the checker.</p>
+<table>
+<thead><tr><th scope="col">Change</th><th scope="col">Why</th><th scope="col">Result</th></tr></thead>
+<tbody>
+<tr><td>First scores</td><td data-l="Why">To know where stage 3 starts.</td><td data-l="Result">131 of 539 sentences (24%) not fully backed by their passage: 90 cited nothing, 40 were only partly backed, 1 not at all. 13 of 18 report questions cited a right report. On 6 of 15 jobs the reports don't cover, it said so.</td></tr>
+<tr><td>Checked the checker by hand</td><td data-l="Why">Its numbers are only worth quoting if a person agrees with its verdicts.</td><td data-l="Result">First check: 24 of 30, below the bar of 27. It marked a ship's name and type as unbacked, because it never saw the report title they came from.</td></tr>
+<tr><td>Showed the checker the report title</td><td data-l="Why">An answer names the ship from the report it cites. The title may name the ship, its type and the casualty, nothing more.</td><td class="res" data-l="Result">The same answers judged again: 28 of 30 agreed. The share not backed went from 27% to 24%.</td></tr>
+</tbody>
+</table>
+<div class="wrong"><b>Still wrong</b><ul>
+<li>Only 25 of the 69 reports chosen as the right ones were among the 8 passages the search returns.</li>
+<li>On 9 of 15 jobs the reports don't cover, it offered a case from a different job instead of saying there was no reliable answer.</li>
+<li>The checker's verdicts vary a little from run to run: about 6 of 449 changed with nothing behind the change.</li>
+</ul></div>
+</div>
 
 <div class="day">
 <div class="dayhead"><time datetime="2026-11-19">19 Nov 2026</time><h3>A test set, and a checker</h3></div>
@@ -125,7 +143,7 @@ footer{border-top:1px solid var(--rule);padding-top:16px;color:var(--muted);font
 </tbody>
 </table>
 <div class="wrong"><b>Not measured yet</b><ul>
-<li>The first scores on the 33 working questions are in. I'm checking 30 of the checker's verdicts by hand first, and its numbers go on this page only if I agree with at least 27 of them.</li>
+<li>The first scores on the 33 working questions are in. I'm checking 30 of the checker's verdicts by hand first, and its numbers go on this page only if I agree with at least 27 of them. (Done on 26 Nov, above.)</li>
 </ul></div>
 </div>
 
@@ -195,8 +213,8 @@ footer{border-top:1px solid var(--rule);padding-top:16px;color:var(--muted);font
 <p class="muted" style="margin-bottom:14px">Six stages, one AI skill each. No dates until a stage is measured.</p>
 <ol class="plan">
 <li><span class="n">1</span><span class="k">Search (RAG)</span><span class="d">Find the matching report passages and answer only from them</span><span class="s done">built</span></li>
-<li><span class="n">2</span><span class="k">Test set (evals)</span><span class="d">Questions with expected answers, from people who have done the jobs</span><span class="s next">started</span></li>
-<li><span class="n">3</span><span class="k">Guardrails</span><span class="d">Remove any sentence its passage doesn't support</span><span class="s">later</span></li>
+<li><span class="n">2</span><span class="k">Test set (evals)</span><span class="d">Questions with expected answers, from people who have done the jobs</span><span class="s done">measured</span></li>
+<li><span class="n">3</span><span class="k">Guardrails</span><span class="d">Remove any sentence its passage doesn't support</span><span class="s next">next</span></li>
 <li><span class="n">4</span><span class="k">Briefings</span><span class="d">Port state control findings, the job briefing and the safety meeting pack</span><span class="s">later</span></li>
 <li><span class="n">5</span><span class="k">Running costs</span><span class="d">Trace each answer's cost and time, and re-test on every change</span><span class="s">later</span></li>
 <li><span class="n">6</span><span class="k">On board</span><span class="d">A small model that runs on board without a connection</span><span class="s">later</span></li>
@@ -205,7 +223,7 @@ footer{border-top:1px solid var(--rule);padding-top:16px;color:var(--muted);font
 </section>
 
 <footer>
-<p>Written by Varun Bhambri. Posts on LinkedIn on Tuesdays. Last updated 24 Nov 2026.</p>
+<p>Written by Varun Bhambri. Posts on LinkedIn on Tuesdays. Last updated 26 Nov 2026.</p>
 <p>Code: <a href="https://github.com/0xvarunb/telltale">github.com/0xvarunb/telltale</a> (MIT licence).</p>
 <p>Reports: UK Marine Accident Investigation Branch (MAIB), Crown copyright, used under the Open Government Licence v3.0.</p>
 </footer>

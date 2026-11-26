@@ -29,8 +29,9 @@
         <ul>
           <li>Answers come only from the report passages it finds for your question. The model is told to add nothing from its own knowledge: no procedures, regulations, figures or advice the passages do not state.</li>
           <li>It does not know about any accident that is not in those reports. It does not know your company's own incidents, fleet circulars, your SMS, the maker's manual or the regulations.</li>
-          <li>For each question it reads only the 8 best-matching groups of passages, each from one report page. A relevant case outside those 8 can be missed.</li>
+          <li>For each question it reads only the 8 best-matching groups of passages, each from one report page. A relevant case outside those 8 can be missed. On the stage 2 test questions, 25 of the 69 reports chosen in advance as the right ones were among those 8 (<code>docs/stage-2-results.md</code>).</li>
           <li>When nothing fits, it says there is no reliable answer in these reports. That means only that the reports it found do not cover the job. It does not mean the job has no hazards.</li>
+          <li>It does not always say so when it should. On the stage 2 test questions, for 15 jobs the reports don't cover, it said there was no reliable answer on 6. On the other 9 it offered cases from a different job. Check that a case it gives is the same job as yours.</li>
         </ul>
 
         <h2>In stage 1 it marks unsupported sentences but does not remove them</h2>
@@ -38,6 +39,7 @@
           <li>Every sentence of an answer should come from a report passage. A sentence the model wrote without citing a passage is shown with "no source" on the page (<code>[no source]</code> on the command line). Stage 1 marks these sentences; it does not yet remove them. Removing them is planned for stage 3.</li>
           <li>A sentence with a source links to the passage the model cited, but stage 1 does not yet check that the passage really supports the sentence. Read the passage before you rely on it.</li>
           <li>The measured share of unsourced sentences in stage 1: 13 of 56 sentences (23%) over three real questions with the current prompt, and 24 of 71 sentences (34%) with the first prompt, on 6 Nov 2026 (<code>docs/stage-1-results.md</code>). One of the earlier ones explained a piece of lifeboat equipment wrongly, from the model's own knowledge. The prompt was adjusted using these same questions, so on new questions the share may be higher.</li>
+          <li>Measured on 33 test questions in stage 2 (answers 19 Nov 2026, checked 26 Nov 2026): 131 of 539 sentences (24.3%) were not fully backed. 90 cited nothing, and of the cited ones a checker model judged 40 only partly backed by their passage and 1 not backed at all. The checker's verdicts were checked by hand: 28 of 30 agreed (<code>docs/stage-2-results.md</code>).</li>
           <li>For comparison only: in the 30 Oct 2026 test on 21 MAIB reports, before this tool was built, 21 of 60 fact sentences came back without a supporting passage.</li>
         </ul>
 

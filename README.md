@@ -99,7 +99,7 @@ to the current folder.
    ```
 
    It asks each working question, then a second model (Claude Sonnet 5.5 unless you pass
-   `--judge-model`) reads every cited sentence against its passage and marks it supported, partly
+   `--judge-model`) reads every cited sentence against its passage and the title of its report and marks it supported, partly
    or not supported. A sentence with no citation counts as not backed. No more questions are asked
    once the run's cost reaches `--max-cost` (default $1.00). `--batch` sends the answers, then the
    checks, as Message Batches at half the live price; each batch can take up to 24 hours.
@@ -110,6 +110,14 @@ to the current folder.
    ```
    uv run telltale eval-report data/eval/runs/RUN_FOLDER
    ```
+
+   To judge a run's saved answers again (after a change to the checker) without asking again:
+
+   ```
+   uv run telltale eval-rejudge data/eval/runs/RUN_FOLDER
+   ```
+
+   It writes a new run folder named after the source run, as one batch at half the price.
 
    The question file (`docs/private/eval/questions.json`) is not in this repository. The 50
    questions and their expected reports are kept private so the tool can't be tuned to them, and
@@ -151,6 +159,7 @@ Telltale is built in six stages, one AI skill per stage, each posted on LinkedIn
 | 6 | Fine-tuning | A small model that can run on board without a connection, compared on the evals | coming | coming |
 
 The concepts used so far are explained in plain English in [docs/concepts.md](docs/concepts.md).
-Stage 1 results: [docs/stage-1-results.md](docs/stage-1-results.md). Stage 2 plan:
+Stage 1 results: [docs/stage-1-results.md](docs/stage-1-results.md). Stage 2 results:
+[docs/stage-2-results.md](docs/stage-2-results.md). Stage 2 plan:
 [docs/plans/2026-11-19-stage-2-evals.md](docs/plans/2026-11-19-stage-2-evals.md). Build log:
 https://telltale-log.vercel.app/ (early entries also in [docs/build-log.md](docs/build-log.md)).

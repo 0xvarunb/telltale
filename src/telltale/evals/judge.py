@@ -19,6 +19,7 @@ import json
 
 import anthropic
 
+from telltale.ingest.store import OCR_NOTE
 from telltale.answer import is_no_answer
 from telltale.evals.score import Verdict
 from telltale.models import Citation, Sentence
@@ -35,6 +36,9 @@ JUDGE_SYSTEM = (
     "- partly: some claims are stated, at least one is not, or the sentence makes a claim "
     "stronger or more certain than the passages.\n"
     "- not_supported: the passages do not state the sentence's claims.\n"
+    "Each passage is headed by the title of the report it comes from. Use that title only "
+    "to tell which ship the passage is about, its type and the casualty the title names; "
+    "the title does not back causes, the order of events or any other detail.\n"
     "Judge only against the passages. Do not use your own knowledge of ships, regulations "
     "or the casualty."
 )
@@ -86,15 +90,22 @@ def require_judge_model(model: str) -> None:
         )
 
 
-def build_judge_request(sentence: str, passages: list[str], model: str) -> dict:
-    """Arguments for `client.messages.create`: the cited passages, numbered, then the sentence,
-    with the verdict schema as the reply format and thinking turned off.
+def build_judge_request(sentence: str, passages: list[tuple[str, str]], model: str) -> dict:
+    """Arguments for `client.messages.create`: the cited passages, numbered, each under its
+    report title (`passages` holds (report title, cited text) pairs), then the sentence, with the
+    verdict schema as the reply format and thinking turned off.
+
+    The title goes with each passage because an answer names the ship from the report it cites,
+    and that name is often in the title only.
 
     Never sends temperature, top_p or top_k.
     """
     if model not in THINKING_OFF:
         require_judge_model(model)
-    numbered = "\n\n".join(f"Passage {n}:\n{text}" for n, text in enumerate(passages, start=1))
+    numbered = "\n\n".join(
+        f"Passage {n}. Report title: {title.removesuffix(OCR_NOTE)}\n{text}"
+        for n, (title, text) in enumerate(passages, start=1)
+    )
     content = f"{numbered}\n\nSentence:\n{sentence}"
     return {
         "model": model,
@@ -134,9 +145,9 @@ def parse_verdict(response) -> tuple[Verdict, str]:
     return verdict.lower(), reason if isinstance(reason, str) else ""
 
 
-def _passages(sentence: Sentence) -> list[str]:
-    """The sentence's cited texts, each once, in order."""
-    return list(dict.fromkeys(c.cited_text for c in sentence.citations))
+def _passages(sentence: Sentence) -> list[tuple[str, str]]:
+    """The sentence's (report title, cited text) pairs, each once, in order."""
+    return list(dict.fromkeys((c.report_title, c.cited_text) for c in sentence.citations))
 
 
 def judge_requests(saved: dict, model: str) -> list[tuple[int, dict]]:

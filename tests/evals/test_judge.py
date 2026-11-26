@@ -21,6 +21,7 @@ from telltale.evals.judge import (
     require_judge_model,
     unjudged_record,
 )
+from telltale.ingest.store import OCR_NOTE
 from telltale.pricing import PRICES, UnknownModelPrice
 from telltale.settings import DEFAULT_JUDGE_MODEL
 
@@ -108,13 +109,44 @@ def test_judge_system_text_is_exact():
         "- partly: some claims are stated, at least one is not, or the sentence makes a claim "
         "stronger or more certain than the passages.\n"
         "- not_supported: the passages do not state the sentence's claims.\n"
+        "Each passage is headed by the title of the report it comes from. Use that title only "
+        "to tell which ship the passage is about, its type and the casualty the title names; "
+        "the title does not back causes, the order of events or any other detail.\n"
         "Judge only against the passages. Do not use your own knowledge of ships, regulations "
         "or the casualty."
     )
 
 
+def test_each_passage_is_shown_under_its_report_title():
+    passages = [
+        ("Fall into a hold on bulk carrier Synthetic Star", "The hatch was left open."),
+        ("Grounding of tanker Synthetic Moon", "No watch was kept on the deck."),
+    ]
+
+    request = build_judge_request("The hatch was open and unwatched.", passages, MODEL)
+
+    assert request["messages"][0]["content"] == (
+        "Passage 1. Report title: Fall into a hold on bulk carrier Synthetic Star\n"
+        "The hatch was left open.\n\n"
+        "Passage 2. Report title: Grounding of tanker Synthetic Moon\n"
+        "No watch was kept on the deck.\n\n"
+        "Sentence:\nThe hatch was open and unwatched."
+    )
+
+
+def test_the_scanned_page_note_is_not_part_of_the_title_shown():
+    title = "Grounding of tanker Synthetic Moon" + OCR_NOTE
+
+    request = build_judge_request("A.", [(title, "B.")], MODEL)
+
+    content = request["messages"][0]["content"]
+    assert content.startswith("Passage 1. Report title: Grounding of tanker Synthetic Moon\nB.")
+    assert OCR_NOTE.strip() not in content
+
+
 def test_request_holds_sentence_and_every_cited_passage():
-    passages = ["The hatch was left open.", "No watch was kept on the deck."]
+    passages = [("Synthetic report A", "The hatch was left open."),
+                ("Synthetic report A", "No watch was kept on the deck.")]
 
     request = build_judge_request("The hatch was open and unwatched.", passages, MODEL)
 
@@ -146,16 +178,16 @@ def test_request_holds_sentence_and_every_cited_passage():
     assert message["role"] == "user"
     sent = str(message["content"])
     assert "The hatch was open and unwatched." in sent
-    for passage in passages:
-        assert passage in sent
+    for title, text in passages:
+        assert title in sent and text in sent
 
 
 def test_each_priced_judge_model_gets_its_own_thinking_off_setting():
     # The lowest thinking setting each model accepts differs: the other one is a 400 error.
-    assert build_judge_request("A.", ["B."], "claude-sonnet-5-5")["thinking"] == {
+    assert build_judge_request("A.", [("Report T", "B.")], "claude-sonnet-5-5")["thinking"] == {
         "type": "between_tools"
     }
-    assert build_judge_request("A.", ["B."], "claude-haiku-5-5")["thinking"] == {
+    assert build_judge_request("A.", [("Report T", "B.")], "claude-haiku-5-5")["thinking"] == {
         "type": "disabled"
     }
 
@@ -164,7 +196,7 @@ def test_a_judge_model_with_no_thinking_off_setting_is_refused(monkeypatch):
     # Priced, so only the missing thinking setting is in the way.
     monkeypatch.setitem(PRICES, "claude-unlisted-test", (1.0, 1.0))
     with pytest.raises(UnsupportedJudgeModel, match="claude-unlisted-test"):
-        build_judge_request("A.", ["B."], "claude-unlisted-test")
+        build_judge_request("A.", [("Report T", "B.")], "claude-unlisted-test")
     with pytest.raises(UnsupportedJudgeModel, match="claude-unlisted-test"):
         require_judge_model("claude-unlisted-test")
     require_judge_model(MODEL)
@@ -288,11 +320,11 @@ def test_uncited_and_no_answer_sentences_are_not_sent():
     assert [r["index"] for r in records] == [0, 3]
     assert len(client.messages.calls) == 2
 
-    # The passages are the sentence's cited texts, each once, in order.
+    # The passages are the sentence's cited texts with their report titles, each once, in order.
     second = client.messages.calls[1]
     assert second == build_judge_request(
         "No one kept watch on the deck.",
-        ["No watch was kept.", "The deck was empty."],
+        [("Synthetic report A", "No watch was kept."), ("Synthetic report B", "The deck was empty.")],
         MODEL,
     )
 

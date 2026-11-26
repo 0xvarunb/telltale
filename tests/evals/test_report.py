@@ -353,7 +353,8 @@ def test_review_sheet_has_30_rows_spread_across_verdicts(tmp_path: Path):
     first = rows[0]
     assert first["reason"] == f"Reason for {first['id']} sentence {first['sentence_index']}."
     assert first["sentence"] == f"{first['id']} fact {first['sentence_index']}."
-    assert first["cited_passages"] == "A passage."
+    # Each passage under its report title, as the judge saw it.
+    assert first["cited_passages"] == "Report title: Report A\nA passage."
 
     # The sample is drawn with a fixed seed, so a rebuild gives the same sheet.
     before = (run_dir / REVIEW_FILE).read_bytes()
@@ -400,7 +401,10 @@ def test_review_sheet_escapes_commas_quotes_and_newlines(tmp_path: Path):
     (row,) = read_sheet(run_dir)
 
     assert row["sentence"] == awkward
-    assert row["cited_passages"] == 'Line one, "two"\nline three.\n\nSecond passage.'
+    assert row["cited_passages"] == (
+        'Report title: Report A\nLine one, "two"\nline three.\n\n'
+        "Report title: Report B\nSecond passage."
+    )
 
 
 def test_report_rebuilds_from_saved_files_without_a_client(tmp_path: Path, monkeypatch):

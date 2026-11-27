@@ -19,7 +19,7 @@
     </main>
 
     <footer>
-      <p>Stage 1 of 6: RAG (retrieval-augmented generation). The tool first finds the report passages that match your job, then writes only from them. Reports: UK MAIB, Crown copyright.</p>
+      <p>Stage 1 of 6: RAG (retrieval-augmented generation). The tool first finds the report passages that match your job, then writes only from them.{% if reports_credit %} Reports: {{ reports_credit }}.{% endif %}</p>
       <p><a href="/limits">What this tool can't do</a></p>
     </footer>
   </div>

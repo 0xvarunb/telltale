@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from pypdf import PdfReader
+from pypdf.errors import DependencyError
 
 from telltale.ingest.ocr import PageReader
 from telltale.text import split_sentences
@@ -21,8 +22,34 @@ SCANNED_PAGE_CHARS = 20
 
 
 def pdf_pages(path: Path) -> list[str]:
-    """The text of each page, in order; an image-only page gives ""."""
-    return [page.extract_text() or "" for page in PdfReader(path).pages]
+    """The text of each page, in order; an image-only page gives "".
+
+    Read with pypdf. An AES-encrypted PDF (every NTSB report) needs the `cryptography` package
+    for pypdf to decrypt it, which Telltale does not install, so such a file is read with
+    pypdfium2 instead.
+    """
+    try:
+        return [page.extract_text() or "" for page in PdfReader(path).pages]
+    except DependencyError as error:
+        logger.debug("%s: %s; reading it with pypdfium2", path.name, error)
+        return _pdfium_pages(path)
+
+
+def _pdfium_pages(path: Path) -> list[str]:
+    import pypdfium2 as pdfium
+
+    document = pdfium.PdfDocument(path)
+    try:
+        pages = []
+        for page in document:
+            text_page = page.get_textpage()
+            # pdfium ends lines with "\r\n"; pypdf, whose text the rest of ingest expects, "\n".
+            pages.append(text_page.get_text_range().replace("\r\n", "\n").replace("\r", "\n"))
+            text_page.close()
+            page.close()
+        return pages
+    finally:
+        document.close()
 
 
 def read_pages(

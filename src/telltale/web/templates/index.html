@@ -44,7 +44,7 @@
             {% endfor %}
           </ol>
           <p class="closing">{{ view.searched_closing }}</p>
-          <p class="credit">Crown copyright</p>
+          <p class="credit">{{ view.searched_credits | join("; ") }}</p>
         </section>
         {% endif %}
 
@@ -62,7 +62,7 @@
                 <blockquote>{{ passage }}</blockquote>
                 {% endfor %}
                 {% if entry.link %}<a class="pdf" href="{{ entry.link }}" target="_blank" rel="noopener">Open the report{% if entry.page is not none %} at page {{ entry.page }}{% endif %}</a>{% endif %}
-                <p class="credit">Crown copyright</p>
+                <p class="credit">{{ entry.credit }}</p>
               </div>
             </li>
             {% endfor %}

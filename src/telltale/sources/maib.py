@@ -4,12 +4,15 @@ import logging
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 
 import httpx
 
 from telltale.http import describe, get
 from telltale.models import ReportMeta
+from telltale.sources import registry
+# Re-exported: the CLI and its tests import both from here.
+from telltale.sources.common import ListingError, SkippedReport, skip
+from telltale.sources.registry import REPORT_TYPE_LABELS
 
 SEARCH_URL = "https://www.gov.uk/api/search.json"
 CONTENT_URL = "https://www.gov.uk/api/content"
@@ -19,15 +22,8 @@ SEARCH_FILTERS = {
     "filter_vessel_type": "merchant-vessel-100-gross-tons-or-over",
     "fields": "title,link,public_timestamp",
 }
-INVESTIGATION_REPORT = "investigation-report"
-# MAIB report types the tool keeps (Ruling 23), with the label shown before a report's title so a
-# reader never mistakes a bulletin or a preliminary examination for a full investigation.
-KEPT_REPORT_TYPES = {
-    INVESTIGATION_REPORT: "",
-    "investigation-report-on-behalf-of-red-ensign-group": "Red Ensign Group investigation",
-    "safety-bulletin": "Safety bulletin",
-    "completed-preliminary-examination": "Preliminary examination",
-}
+# MAIB report types the tool keeps (Ruling 23), with their title labels.
+KEPT_REPORT_TYPES = REPORT_TYPE_LABELS["maib"]
 PAUSE_SECONDS = 0.2
 
 logger = logging.getLogger(__name__)
@@ -45,26 +41,6 @@ SECONDARY_ATTACHMENT = re.compile(
 
 # Tests replace this so they never wait.
 _sleep = time.sleep
-
-
-class ListingError(Exception):
-    """The search API answered with something the listing cannot page through."""
-
-
-@dataclass
-class SkippedReport:
-    """A search result left out of the listing.
-
-    `dropped` is True when it may be an investigation report that could not be read (no report
-    type, or its content request failed); False for another report type such as a safety
-    bulletin, which is an expected filter.
-    """
-
-    slug: str
-    title: str
-    page_url: str
-    reason: str
-    dropped: bool
 
 
 def _get_json(client: httpx.Client, url: str, params: dict | None = None) -> dict:
@@ -137,20 +113,6 @@ def _to_report(result: dict, content: dict) -> ReportMeta:
     )
 
 
-def _skip(on_skip: Callable[[SkippedReport], None] | None, skipped: SkippedReport) -> None:
-    if skipped.dropped:
-        logger.warning(
-            "left out %s (%s): %s",
-            skipped.slug or skipped.title,
-            skipped.reason,
-            skipped.page_url or "no page link",
-        )
-    else:
-        logger.debug("left out %s (%s)", skipped.slug, skipped.reason)
-    if on_skip is not None:
-        on_skip(skipped)
-
-
 def list_merchant_reports(
     client: httpx.Client,
     page_size: int = 100,
@@ -186,7 +148,8 @@ def list_merchant_reports(
             if not isinstance(link, str) or not link.strip("/"):
                 # No page link to give: name it by its title, else its place in the search.
                 name = title if isinstance(title, str) and title else f"search result {position}"
-                _skip(on_skip, SkippedReport("", name, "", "search result has no link", True))
+                reason = "search result has no link"
+                skip(on_skip, SkippedReport("", name, "", reason, True), logger)
                 continue
             slug = _slug(link)
             page_url = SITE_URL + link
@@ -205,14 +168,14 @@ def list_merchant_reports(
                 # ValueError covers a 200 whose body is not JSON.
                 why = describe(error) if isinstance(error, httpx.HTTPError) else str(error)
                 reason = f"content request failed: {why}"
-                _skip(on_skip, SkippedReport(slug, name, page_url, reason, dropped=True))
+                skip(on_skip, SkippedReport(slug, name, page_url, reason, dropped=True), logger)
                 continue
             try:
                 report = _to_report(result, content)
             except (AttributeError, KeyError, TypeError, ValueError) as error:
                 # A malformed search result or content body drops this report, not the listing.
                 reason = f"content could not be read: {type(error).__name__}: {error}"
-                _skip(on_skip, SkippedReport(slug, name, page_url, reason, dropped=True))
+                skip(on_skip, SkippedReport(slug, name, page_url, reason, dropped=True), logger)
                 continue
             if report.report_type in KEPT_REPORT_TYPES:
                 reports.append(report)
@@ -221,7 +184,7 @@ def list_merchant_reports(
             skipped = SkippedReport(
                 report.slug, report.title, report.page_url, reason, dropped=not report.report_type
             )
-            _skip(on_skip, skipped)
+            skip(on_skip, skipped, logger)
 
         start += len(results)
         if not results or start >= page["total"]:
@@ -231,6 +194,5 @@ def list_merchant_reports(
 
 
 def labelled_title(title: str, report_type: str) -> str:
-    """The title as shown in answers: prefixed with its type unless it is a full investigation."""
-    label = KEPT_REPORT_TYPES.get(report_type, "")
-    return f"{label}: {title}" if label else title
+    """A MAIB report's title as shown in answers (`registry.labelled_title`)."""
+    return registry.labelled_title(title, report_type, "maib")

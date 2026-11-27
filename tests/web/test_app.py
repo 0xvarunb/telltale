@@ -29,7 +29,7 @@ LIMITS_SENTENCES = [
     "It covers MAIB merchant-ship reports only",
     "It knows nothing outside those reports",
     "It does not know about any accident that is not in those reports.",
-    "Stage 1 marks these sentences; it does not yet remove them.",
+    "The tool marks these sentences; it does not yet remove them.",
     "The measured share of unsourced sentences in stage 1:",
     "It never says a job is safe, or \"safe to proceed\".",
     "It never replaces the permit to work, the risk assessment, the SMS or the office's permission.",
@@ -107,6 +107,25 @@ def test_form_renders():
     assert 'action="/ask"' in response.text
 
 
+def test_footer_names_every_publisher_with_reports_in_the_store():
+    client = TestClient(create_app(StubAnswer(), ["maib", "ntsb"]), raise_server_exceptions=False)
+
+    for path in ("/", "/limits"):
+        page = client.get(path).text
+        assert (
+            "then writes only from them. Reports: UK MAIB, Crown copyright; "
+            "US NTSB, US Government work.</p>"
+        ) in page
+    answered = client.post("/ask", data={"question": "entering a ballast tank"}).text
+    assert "Reports: UK MAIB, Crown copyright; US NTSB, US Government work." in answered
+
+
+def test_footer_of_a_maib_only_store_is_unchanged():
+    page = TestClient(create_app(StubAnswer(), ["maib"])).get("/").text
+
+    assert FOOTER + "</p>" in page
+
+
 def test_footer_links_limits_page():
     client = client_for(StubAnswer())
 
@@ -156,6 +175,61 @@ def test_limits_page_matches_docs():
         assert _plain(block) in doc
     for sentence in LIMITS_SENTENCES:
         assert sentence in doc
+
+
+def _limits_blocks(client: TestClient) -> list[str]:
+    """Each heading, paragraph and list item of the limits page, as plain text."""
+    html = client.get("/limits").text
+    article = re.search(r"<article.*?</article>", html, re.DOTALL).group(0)
+    return [
+        _plain(block)
+        for _, block in re.findall(r"<(h1|h2|p|li)\b[^>]*>(.*?)</\1>", article, re.DOTALL)
+    ]
+
+
+THREE_CREDITS = (
+    "Reports: UK MAIB, Crown copyright, used under the Open Government Licence v3.0; "
+    "US NTSB, US Government work, not subject to copyright in the US; "
+    "Singapore TSIB, public reports, each cited and linked."
+)
+
+
+def test_limits_page_of_a_maib_ntsb_tsib_store_matches_docs():
+    client = TestClient(create_app(StubAnswer(), ["maib", "ntsb", "tsib"]))
+    blocks = _limits_blocks(client)
+    doc = _doc_text()
+
+    assert "It covers MAIB, NTSB and TSIB merchant-ship reports only" in blocks
+    assert any(b.startswith("It searches reports from the US National Transportation Safety Board")
+               for b in blocks)
+    assert any(b.startswith("It searches the final reports of the Transport Safety Investigation "
+                            "Bureau, Singapore") for b in blocks)
+    assert "It has no reports from any other country's accident investigators yet." not in blocks
+    assert any("Australian Transport Safety Bureau (ATSB)" in b for b in blocks)
+    assert THREE_CREDITS in blocks
+    # Every heading, paragraph and list item on the page is in the doc, word for word.
+    for block in blocks:
+        assert block in doc
+
+
+def test_limits_page_names_only_the_publishers_in_the_store():
+    blocks = _limits_blocks(TestClient(create_app(StubAnswer(), ["maib", "ntsb"])))
+
+    assert "It covers MAIB and NTSB merchant-ship reports only" in blocks
+    assert not any("TSIB" in b for b in blocks)
+    assert (
+        "Reports: UK MAIB, Crown copyright, used under the Open Government Licence v3.0; "
+        "US NTSB, US Government work, not subject to copyright in the US."
+    ) in blocks
+
+
+def test_limits_page_of_a_maib_only_store_names_no_other_publisher():
+    blocks = _limits_blocks(TestClient(create_app(StubAnswer(), ["maib"])))
+
+    assert "It covers MAIB merchant-ship reports only" in blocks
+    assert "It has no reports from any other country's accident investigators yet." in blocks
+    assert "Reports: UK MAIB, Crown copyright, used under the Open Government Licence v3.0." in blocks
+    assert not any(name in b for b in blocks for name in ("NTSB", "TSIB", "ATSB"))
 
 
 def test_answer_shows_sources_and_no_source_marker():
@@ -525,3 +599,48 @@ def test_a_sourced_answer_shows_no_reports_searched():
     assert searched_panel(html) == ""
     assert "Reports searched" not in html
     assert SEARCHED_CLOSING not in html
+
+
+def test_page_shows_each_source_credit():
+    atsb = Citation(
+        report_title="Test report charlie",
+        source="https://www.atsb.gov.au/test/report-charlie.pdf#page=2",
+        cited_text="The hatch was left open.",
+        source_id="atsb",
+    )
+    stub = StubAnswer(make_answer([
+        Sentence(text=SOURCED, citations=[ALPHA]),
+        Sentence(text="On the test vessel Charlie, the hatch was left open.", citations=[atsb]),
+    ]))
+
+    html = client_for(stub).post("/ask", data={"question": "entering a ballast tank"}).text
+
+    panel = sources_panel(html)
+    first, second = re.findall(r'<li id="source-\d+">.*?</li>', panel, re.DOTALL)
+    assert '<p class="credit">Crown copyright</p>' in first
+    assert "CC BY 4.0" not in first
+    assert '<p class="credit">CC BY 4.0, ATSB</p>' in second
+    assert "Crown copyright" not in second
+
+
+def test_reports_searched_credit_each_publisher():
+    ntsb = Chunk(
+        id=8,
+        report_slug="ntsb-test-report-g",
+        report_title="Test report g",
+        url="https://www.ntsb.gov/test/report-g.pdf",
+        page=4,
+        passages=["Passage 8."],
+        source_id="ntsb",
+    )
+    stub = StubAnswer(
+        make_answer([Sentence(text=NO_ANSWER, citations=[])], chunks=[SEARCHED[0], ntsb])
+    )
+
+    html = client_for(stub).post("/ask", data={"question": "opening up a crankcase"}).text
+
+    panel = searched_panel(html)
+    assert (
+        '<p class="credit">Crown copyright; US Government work, credited to the NTSB</p>'
+        in panel
+    )

@@ -229,3 +229,121 @@ def test_store_made_before_ocr_is_upgraded(tmp_path: Path):
         store.upsert_report(report())
         store.replace_chunks("test-report-alpha", [(1, ["Old store, new column."])])
         assert store.chunks()[0].ocr is False
+
+
+def test_old_store_reads_as_maib(tmp_path: Path):
+    import sqlite3
+
+    path = tmp_path / "old.sqlite"
+    db = sqlite3.connect(path)
+    db.executescript(
+        """CREATE TABLE reports (slug TEXT PRIMARY KEY, title TEXT NOT NULL,
+        page_url TEXT NOT NULL, published TEXT NOT NULL, occurred TEXT,
+        vessel_types TEXT NOT NULL, report_type TEXT NOT NULL, pdf_url TEXT);
+        CREATE TABLE chunks (id INTEGER PRIMARY KEY AUTOINCREMENT,
+        report_slug TEXT NOT NULL REFERENCES reports(slug), page INTEGER NOT NULL,
+        passages TEXT NOT NULL, passage_count INTEGER NOT NULL,
+        ocr INTEGER NOT NULL DEFAULT 0);
+        INSERT INTO reports VALUES ('test-report-alpha', 'Alpha', 'https://www.gov.uk/a',
+            '2026-03-12', NULL, '[]', 'investigation-report', 'https://x/a.pdf');
+        INSERT INTO reports VALUES ('test-report-bravo', 'Bravo', 'https://www.gov.uk/b',
+            '2026-03-11', NULL, '[]', 'investigation-report', 'https://x/b.pdf');
+        INSERT INTO chunks VALUES (7, 'test-report-alpha', 1, '["One."]', 1, 0);
+        INSERT INTO chunks VALUES (9, 'test-report-bravo', 2, '["Two."]', 1, 0);"""
+    )
+    db.close()
+
+    with Store(path) as store:
+        assert [(r.slug, r.source) for r in store.reports()] == [
+            ("test-report-alpha", "maib"),
+            ("test-report-bravo", "maib"),
+        ]
+        assert [(c.id, c.source_id) for c in store.chunks()] == [(7, "maib"), (9, "maib")]
+
+    with Store(path) as store:  # reopening an upgraded store changes nothing
+        assert [c.id for c in store.chunks()] == [7, 9]
+
+
+def test_reports_of_two_publishers_with_the_same_title_are_both_kept(store: Store):
+    store.upsert_report(report("collision-in-fog", title="Collision in fog"))
+    store.upsert_report(
+        report("ntsb-collision-in-fog", title="Collision in fog", source="ntsb")
+    )
+    store.replace_chunks("collision-in-fog", [(1, ["MAIB text."])])
+    store.replace_chunks("ntsb-collision-in-fog", [(1, ["NTSB text."])])
+
+    assert sorted((r.slug, r.source) for r in store.reports()) == [
+        ("collision-in-fog", "maib"),
+        ("ntsb-collision-in-fog", "ntsb"),
+    ]
+    assert sorted((c.report_slug, c.source_id) for c in store.chunks()) == [
+        ("collision-in-fog", "maib"),
+        ("ntsb-collision-in-fog", "ntsb"),
+    ]
+
+
+def test_upsert_records_a_changed_publisher(store: Store):
+    store.upsert_report(report())
+    store.upsert_report(report(source="atsb"))
+
+    assert [r.source for r in store.reports()] == ["atsb"]
+
+
+def test_upsert_refuses_an_unknown_publisher(store: Store):
+    with pytest.raises(KeyError, match="bsu"):
+        store.upsert_report(report("bsu-collision-in-fog", source="bsu"))
+
+    assert store.reports() == []
+
+
+def test_chunk_titles_of_another_publisher_carry_no_maib_label(store: Store):
+    store.upsert_report(report("ntsb-hooks", report_type="safety-bulletin", source="ntsb"))
+    store.replace_chunks("ntsb-hooks", [(1, ["Check the hooks."])])
+
+    assert [c.report_title for c in store.chunks()] == ["Test report ntsb-hooks"]
+
+
+def _two_publishers(store: Store) -> None:
+    """MAIB: one PDF report with an OCR page, one read from its page. NTSB: one PDF report."""
+    store.upsert_report(report("maib-alpha"))
+    store.replace_chunks("maib-alpha", [(1, ["Typed.", "Typed again."]), (2, ["Scanned."])], frozenset({2}))
+    store.upsert_report(report("maib-bravo", None, report_type=PRELIMINARY))
+    store.replace_chunks("maib-bravo", [(1, ["From the page."])])
+    store.upsert_report(report("ntsb-charlie", report_type="Report", source="ntsb"))
+    store.replace_chunks("ntsb-charlie", [(1, ["Hooks."]), (2, ["Falls."])])
+
+
+def test_counts_split_by_publisher(store: Store):
+    _two_publishers(store)
+
+    assert store.counts("maib") == {
+        "reports": 2, "with_pdf": 1, "from_page": 1, "chunks": 3, "passages": 4
+    }
+    assert store.counts("ntsb") == {
+        "reports": 1, "with_pdf": 1, "from_page": 0, "chunks": 2, "passages": 2
+    }
+    assert store.counts("tsib") == {
+        "reports": 0, "with_pdf": 0, "from_page": 0, "chunks": 0, "passages": 0
+    }
+    # With no publisher named, every publisher together, as before.
+    assert store.counts() == {"reports": 3, "with_pdf": 2, "from_page": 1, "chunks": 5, "passages": 6}
+
+
+def test_report_types_and_ocr_pages_split_by_publisher(store: Store):
+    _two_publishers(store)
+
+    assert store.report_types("maib") == {"investigation-report": 1, PRELIMINARY: 1}
+    assert store.report_types("ntsb") == {"Report": 1}
+    assert store.report_types() == {"Report": 1, "investigation-report": 1, PRELIMINARY: 1}
+    assert store.ocr_pages("maib") == 1
+    assert store.ocr_pages("ntsb") == 0
+    assert store.ocr_pages() == 1
+
+
+def test_sources_name_each_publisher_with_reports_in_registry_order(store: Store):
+    assert store.sources() == []
+    store.upsert_report(report("tsib-delta", source="tsib"))
+    store.upsert_report(report("ntsb-charlie", source="ntsb"))
+    store.upsert_report(report("maib-alpha"))
+
+    assert store.sources() == ["maib", "ntsb", "tsib"]

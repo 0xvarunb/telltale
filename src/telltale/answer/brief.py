@@ -55,17 +55,25 @@ def _clean(raw: str) -> str:
     return " ".join(text.split())
 
 
-def _citation(raw, titles: dict[str, str]) -> Citation | None:
+def _citation(raw, by_source: dict[str, Chunk]) -> Citation | None:
     """A search-result citation as a `Citation`; anything without a source is skipped.
 
-    The report title comes from the retrieved chunk with that source when known, otherwise from
-    the result title with its " (page N)" or " (GOV.UK page)" suffix removed.
+    The report title and publisher come from the retrieved chunk with that source when known;
+    otherwise the title is the result title with its " (page N)" or " (GOV.UK page)" suffix
+    removed, and the publisher is `Citation`'s default (MAIB). Every source the model is sent is a
+    retrieved chunk's, so only a caller that passes no chunks gets the fallback.
     """
     source = getattr(raw, "source", None)
     if not source:
         return None
-    title = titles.get(source) or _PAGE_SUFFIX.sub("", getattr(raw, "title", None) or "")
-    return Citation(report_title=title, source=source, cited_text=raw.cited_text)
+    chunk = by_source.get(source)
+    title = (chunk and chunk.report_title) or _PAGE_SUFFIX.sub(
+        "", getattr(raw, "title", None) or ""
+    )
+    citation = Citation(report_title=title, source=source, cited_text=raw.cited_text)
+    if chunk is not None:
+        citation.source_id = chunk.source_id
+    return citation
 
 
 def parse_sentences(blocks: list, chunks: list[Chunk] | None = None) -> list[Sentence]:
@@ -73,13 +81,13 @@ def parse_sentences(blocks: list, chunks: list[Chunk] | None = None) -> list[Sen
 
     Identical citations are kept once per sentence. Fragments under four words are dropped.
     """
-    titles = {chunk.source: chunk.report_title for chunk in chunks or []}
+    by_source = {chunk.source: chunk for chunk in chunks or []}
     full = ""
     block_spans: list[tuple[int, int, list[Citation]]] = []
     for block in blocks:
         if getattr(block, "type", None) != "text":
             continue
-        cites = [c for raw in block.citations or [] if (c := _citation(raw, titles))]
+        cites = [c for raw in block.citations or [] if (c := _citation(raw, by_source))]
         block_spans.append((len(full), len(full) + len(block.text), cites))
         full += block.text
 

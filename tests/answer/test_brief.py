@@ -99,6 +99,23 @@ def test_request_shape():
         assert result["content"][1:] == [{"type": "text", "text": p} for p in c.passages]
 
 
+def test_answer_request_refuses_a_model_with_no_thinking_off_setting():
+    from telltale.thinking import UnsupportedModel
+
+    with pytest.raises(UnsupportedModel, match="THINKING_OFF in telltale/thinking.py"):
+        build_request("Entering a ballast tank", [chunk()], "claude-unlisted-test")
+
+
+def test_answer_request_turns_thinking_off():
+    # Each answering model gets the lowest thinking setting it accepts.
+    assert build_request("Entering a ballast tank", [chunk()], "claude-sonnet-5-5")[
+        "thinking"
+    ] == {"type": "between_tools"}
+    assert build_request("Entering a ballast tank", [chunk()], "claude-haiku-5-5")[
+        "thinking"
+    ] == {"type": "disabled"}
+
+
 def test_sentence_spanning_two_blocks_gets_both_citations():
     first = cite("The tank had not been ventilated.")
     second = cite("Two crew collapsed.")
@@ -563,3 +580,51 @@ def test_answer_from_response_with_no_sentences_says_no_reliable_answer():
 
     assert [s.text for s in result.sentences] == [NO_ANSWER]
     assert result.stop_reason == "refusal"
+
+
+def test_request_names_each_passage_publisher():
+    ntsb = Chunk(
+        id=2,
+        report_slug="ntsb-test-report",
+        report_title="Collision of a test tanker",
+        url="https://www.ntsb.gov/test/report.pdf",
+        page=7,
+        passages=["The lookout was not posted."],
+        source_id="ntsb",
+    )
+
+    request = build_request("Keeping a lookout", [chunk(), ntsb], MODEL)
+
+    maib_result, ntsb_result = request["messages"][0]["content"][:2]
+    assert maib_result["content"][0] == {
+        "type": "text",
+        "text": f"This passage is from the MAIB report: {TITLE}.",
+    }
+    assert ntsb_result["content"][0] == {
+        "type": "text",
+        "text": "This passage is from the NTSB report: Collision of a test tanker.",
+    }
+
+
+def test_citation_carries_the_publisher_of_its_passage():
+    ntsb_url = "https://www.ntsb.gov/test/report.pdf"
+    ntsb = Chunk(
+        id=2,
+        report_slug="ntsb-test-report",
+        report_title="Collision of a test tanker",
+        url=ntsb_url,
+        page=7,
+        passages=["The lookout was not posted."],
+        source_id="ntsb",
+    )
+    blocks = [
+        block("The tank had not been ventilated before entry.", cite("The tank had not been ventilated.")),
+        block(
+            " No lookout was posted on the bridge that night.",
+            cite("The lookout was not posted.", source=f"{ntsb_url}#page=7", title=None),
+        ),
+    ]
+
+    sentences = parse_sentences(blocks, chunks=[chunk(), ntsb])
+
+    assert [[c.source_id for c in s.citations] for s in sentences] == [["maib"], ["ntsb"]]

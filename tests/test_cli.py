@@ -9,7 +9,7 @@ import pytest
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
-from helpers import HashEmbedder
+from helpers import CountingEmbedder, HashEmbedder
 from telltale import cli
 from telltale.answer.brief import CUT_OFF, CUT_OFF_EMPTY, NO_ANSWER, REFUSED
 from telltale.ingest.download import DownloadError
@@ -247,7 +247,7 @@ def test_ingest_survives_a_failing_report_and_rebuilds_the_index(
     dropped = out.split("Left out of the listing because they could not be read")[1]
     assert "(1):" in dropped
     assert "https://www.gov.uk/maib-reports/test-report-echo" in dropped
-    assert "Other report types left out: 1 (overseas-report 1)" in out
+    assert "Out of scope, left out:\n  MAIB: 1 (overseas-report 1)" in out
     assert "    investigation-report: " in out
 
 
@@ -531,7 +531,7 @@ def test_ingest_index_bug_is_logged_with_its_traceback(
     assert isinstance(records[0].exc_info[1], ValueError)
     # A dropped search result with no link is still listed, without a page link.
     dropped = captured.out.split("Left out of the listing because they could not be read")[1]
-    assert "search result 4: search result has no link\n    no page link" in dropped
+    assert "MAIB (1):\n    - search result 4: search result has no link\n      no page link" in dropped
 
 
 def test_ingest_offline_index_failure_logs_no_traceback(monkeypatch, tmp_path: Path, caplog):
@@ -581,6 +581,42 @@ def test_ingest_reads_the_page_text_of_a_report_with_no_pdf(monkeypatch, tmp_pat
         "Synopsis The pilot over-corrected and the vessel grounded on the bank. Place on board: Hull"
     ]
     assert "Figure 1" not in " ".join(chunk.passages)
+
+
+def test_ingest_run_twice_reuses_the_saved_embeddings(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    reports = [
+        replace(
+            report(f"test-report-{name}", None),
+            page_html=f"<h2>Synopsis</h2><p>The {name} mooring line parted during berthing.</p>",
+        )
+        for name in ("hotel", "india")
+    ]
+    monkeypatch.setattr(cli, "list_merchant_reports", lambda *a, **k: reports)
+    monkeypatch.setattr(cli, "download_pdf", lambda client, meta, dest: None)
+    embedders: list[CountingEmbedder] = []
+
+    def counting(data_dir):
+        embedders.append(CountingEmbedder())
+        return embedders[-1]
+
+    monkeypatch.setattr(cli, "embedder", counting)
+
+    assert cli.main(["ingest"]) == 0
+    first = capsys.readouterr().out
+    assert "No saved embeddings to reuse; embedding all 2 page groups." in first
+    assert [len(call) for call in embedders[0].calls] == [2]
+
+    assert cli.main(["ingest"]) == 0
+    second = capsys.readouterr().out
+    assert "Reused 2 saved embeddings; no new page groups to embed." in second
+    assert embedders[1].calls == []
+    assert "Search index saved to" in second
+    with Store(tmp_path / "data" / "telltale.sqlite") as store:
+        chunks = store.chunks()
+    index = HybridIndex.load(tmp_path / "data" / "index", chunks, CountingEmbedder())
+    assert index.search("hotel mooring line")[0].report_slug == "test-report-hotel"
 
 
 # What was searched: shown on a no-answer result, and always saved with `--save`.
@@ -675,25 +711,26 @@ def test_ask_save_records_every_chunk_searched(
     pdf = "https://assets.publishing.service.gov.uk/media/test/report-{}.pdf#page={}"
     assert data["searched"] == [
         {"report_title": "Test report a", "page": 3, "source": pdf.format("a", 3),
-         "report_slug": "test-report-a"},
+         "report_slug": "test-report-a", "source_id": "maib"},
         {"report_title": "Test report b", "page": 7, "source": pdf.format("b", 7),
-         "report_slug": "test-report-b"},
+         "report_slug": "test-report-b", "source_id": "maib"},
         {"report_title": "Test report a", "page": 9, "source": pdf.format("a", 9),
-         "report_slug": "test-report-a"},
+         "report_slug": "test-report-a", "source_id": "maib"},
         {"report_title": "Test report c", "page": 1, "source": pdf.format("c", 1),
-         "report_slug": "test-report-c"},
+         "report_slug": "test-report-c", "source_id": "maib"},
         {"report_title": "Test report d", "page": 2, "source": pdf.format("d", 2),
-         "report_slug": "test-report-d"},
+         "report_slug": "test-report-d", "source_id": "maib"},
         {"report_title": "Test report e", "page": 5, "source": pdf.format("e", 5),
-         "report_slug": "test-report-e"},
+         "report_slug": "test-report-e", "source_id": "maib"},
         {"report_title": "Test report f", "page": 8, "source": pdf.format("f", 8),
-         "report_slug": "test-report-f"},
+         "report_slug": "test-report-f", "source_id": "maib"},
         # A GOV.UK page has no page numbers, so none is recorded.
         {
             "report_title": "Test report g",
             "page": None,
             "source": "https://www.gov.uk/maib-reports/test-report-g",
             "report_slug": "test-report-g",
+            "source_id": "maib",
         },
     ]
 
@@ -843,6 +880,21 @@ def test_eval_refuses_a_judge_model_with_no_thinking_off_setting_before_any_call
     err = capsys.readouterr().err
     assert "claude-unlisted-test" in err
     assert "thinking" in err
+    assert eval_offline == []
+
+
+def test_eval_refuses_an_answer_model_with_no_thinking_setting_before_any_call(
+    eval_offline, monkeypatch, capsys
+):
+    from telltale.pricing import PRICES
+
+    # Priced, so only the missing thinking-off setting is in the way.
+    monkeypatch.setitem(PRICES, "claude-unlisted-test", (1.0, 1.0))
+    monkeypatch.setattr(cli, "_settings_with_key", lambda command: eval_offline.append("key"))
+    assert cli.main(["eval", "--model", "claude-unlisted-test"]) == 1
+    err = capsys.readouterr().err
+    assert "claude-unlisted-test" in err
+    assert "THINKING_OFF in telltale/thinking.py" in err
     assert eval_offline == []
 
 
@@ -1179,3 +1231,473 @@ def test_eval_rejudge_on_a_run_file_that_is_not_utf8_says_so(eval_offline, tmp_p
     assert cli.main(["eval-rejudge", str(odd)]) == 1
     assert "run.json" in capsys.readouterr().err
 
+
+
+def test_eval_public_set_writes_only_working_questions(
+    eval_offline, monkeypatch, tmp_path: Path, capsys
+):
+    def no_key(command):
+        raise AssertionError("eval-public-set must not read the key")
+
+    monkeypatch.setattr(cli, "_settings_with_key", no_key)
+    out = tmp_path / "site" / "test-set.md"
+    assert cli.main(["eval-public-set", "--out", str(out)]) == 0
+
+    page = out.read_text(encoding="utf-8")
+    assert "Synthetic working question?" in page
+    assert "W1" in page
+    assert "Synthetic blind question?" not in page
+    assert "B1" not in page
+    assert "[Test report synthetic-alpha](<https://www.gov.uk/maib-reports/synthetic-alpha>)" in page
+    assert "1 working question" in page
+    assert str(out) in capsys.readouterr().out
+    assert eval_offline == []
+
+
+def test_eval_public_set_writes_to_docs_test_set_by_default():
+    args = cli._parser().parse_args(["eval-public-set"])
+    assert args.out == Path("docs/test-set.md")
+
+
+def test_cli_sources_show_each_publisher_credit(ask_offline, monkeypatch, capsys):
+    atsb = Citation(
+        report_title="Test report bravo",
+        source="https://www.atsb.gov.au/test/report-bravo.pdf#page=9",
+        cited_text="The second officer collapsed.",
+        source_id="atsb",
+    )
+    monkeypatch.setattr(cli, "answer", stub_answer([
+        Sentence(text=SOURCED, citations=[CITATION]),
+        Sentence(text="The second officer collapsed at the foot of the ladder.", citations=[atsb]),
+    ]))
+
+    assert cli.main(["ask", "entering a ballast tank"]) == 0
+
+    sources = capsys.readouterr().out.split("Sources:")[1].split("Cost:")[0]
+    entries = [line for line in sources.splitlines() if line.startswith("[")]
+    assert entries == [
+        "[1] Test report alpha, page 4. Crown copyright.",
+        "[2] Test report bravo, page 9. CC BY 4.0, ATSB.",
+    ]
+
+
+# `telltale ingest --source`: which publishers are listed, and the counts per publisher.
+
+
+def publisher_report(slug: str, source: str, pdf: bool = True) -> ReportMeta:
+    return replace(
+        report(slug, f"https://reports.example.test/{slug}.pdf" if pdf else None),
+        page_url=f"https://reports.example.test/{slug}",
+        report_type="Report",
+        source=source,
+    )
+
+
+@pytest.fixture
+def ingest_offline(monkeypatch, tmp_path: Path):
+    """Fake listers for MAIB, NTSB and TSIB and a fake download, recording each call in order.
+    Each lister returns one report, and passes one dropped and one out-of-scope result to
+    `on_skip`. No request is made and no OCR or embedding model is loaded."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    events: list[tuple] = []
+
+    def lister(source: str):
+        def fake(client, *, limit=None, on_skip=None, export_path=None):
+            events.append(("list", source, limit, export_path))
+            on_skip(SkippedReport(
+                f"{source}-unread", f"Unread {source} result", f"https://reports.example.test/{source}-unread",
+                "page request failed", dropped=True,
+            ))
+            on_skip(SkippedReport(f"{source}-out", "Out", "", "fishing vessel", dropped=False))
+            return [publisher_report(f"{source}-report-alpha", source)]
+        return fake
+
+    def fake_download(client, meta, dest):
+        events.append(("download", meta.slug))
+        dest.mkdir(parents=True, exist_ok=True)
+        path = dest / f"{meta.slug}.pdf"
+        write_text_pdf(path, f"The {meta.source} mooring line parted.")
+        return path
+
+    monkeypatch.setattr(cli, "list_merchant_reports", lister("maib"))
+    monkeypatch.setattr(cli, "list_ntsb_reports", lister("ntsb"))
+    monkeypatch.setattr(cli, "list_tsib_reports", lister("tsib"))
+    monkeypatch.setattr(cli, "download_pdf", fake_download)
+    monkeypatch.setattr(cli, "embedder", lambda data_dir: HashEmbedder())
+    export = tmp_path / "carol.json"
+    export.write_text('{"results": []}')
+    return SimpleNamespace(events=events, export=export, data=tmp_path / "data")
+
+
+def listed(events: list[tuple]) -> list[str]:
+    return [event[1] for event in events if event[0] == "list"]
+
+
+@pytest.mark.parametrize("source", ["tsib", "ntsb"])
+def test_ingest_source_lists_only_that_publisher(ingest_offline, source):
+    args = ["ingest", "--source", source]
+    if source == "ntsb":
+        args += ["--ntsb-export", str(ingest_offline.export)]
+
+    assert cli.main(args) == 0
+
+    assert listed(ingest_offline.events) == [source]
+    if source == "ntsb":
+        [event] = [e for e in ingest_offline.events if e[0] == "list"]
+        assert event[3] == ingest_offline.export
+    with Store(ingest_offline.data / "telltale.sqlite") as store:
+        assert store.sources() == [source]
+        chunks = store.chunks()
+    assert [c.source_id for c in chunks] == [source]
+    index = HybridIndex.load(ingest_offline.data / "index", chunks, HashEmbedder())
+    assert index.search("mooring line parted")
+
+
+def test_ingest_all_lists_each_publisher_in_turn(ingest_offline, capsys):
+    assert cli.main(
+        ["ingest", "--source", "all", "--ntsb-export", str(ingest_offline.export), "--limit", "5"]
+    ) == 0
+
+    # Each publisher is listed and its reports stored before the next is listed.
+    assert ingest_offline.events == [
+        ("list", "maib", 5, None),
+        ("download", "maib-report-alpha"),
+        ("list", "ntsb", 5, ingest_offline.export),
+        ("download", "ntsb-report-alpha"),
+        ("list", "tsib", 5, None),
+        ("download", "tsib-report-alpha"),
+    ]
+    out = capsys.readouterr().out
+    # The index is built once, at the end, over the whole store.
+    assert out.count("Building the search index") == 1
+    assert out.index("Building the search index") > out.index("tsib-report-alpha")
+    with Store(ingest_offline.data / "telltale.sqlite") as store:
+        chunks = store.chunks()
+    index = HybridIndex.load(ingest_offline.data / "index", chunks, HashEmbedder())
+    assert {c.source_id for c in index.search("mooring line parted", k=10)} == {
+        "maib", "ntsb", "tsib"
+    }
+
+
+def test_ingest_default_is_maib(ingest_offline, capsys):
+    assert cli.main(["ingest"]) == 0
+
+    assert ingest_offline.events == [
+        ("list", "maib", None, None),
+        ("download", "maib-report-alpha"),
+    ]
+    assert "Listing MAIB reports (one request per report; this takes a while)." in (
+        capsys.readouterr().out
+    )
+
+
+def test_ingest_prints_counts_per_publisher(ingest_offline, monkeypatch, capsys):
+    with Store(ingest_offline.data / "telltale.sqlite") as store:
+        # From an earlier run: a MAIB report read from its GOV.UK page.
+        store.upsert_report(report("maib-report-page", None))
+        store.replace_chunks("maib-report-page", [(1, ["Read from the page.", "Twice."])])
+
+    assert cli.main(["ingest", "--source", "all", "--ntsb-export", str(ingest_offline.export)]) == 0
+
+    out = capsys.readouterr().out
+    store_counts = out.split("all runs so far:\n")[1].split("Search index saved")[0]
+    assert store_counts == (
+        "  MAIB (Marine Accident Investigation Branch):\n"
+        "    Reports:                 2\n"
+        "      Report: 1\n"
+        "      investigation-report: 1\n"
+        "    Reports with a PDF link: 1\n"
+        "    Reports read from their GOV.UK page (no PDF): 1\n"
+        "    Page groups (chunks):    2\n"
+        "    Passages:                3\n"
+        "    Pages read by OCR:       0\n"
+        "  NTSB (National Transportation Safety Board):\n"
+        "    Reports:                 1\n"
+        "      Report: 1\n"
+        "    Reports with a PDF link: 1\n"
+        "    Reports read from their web page (no PDF): 0\n"
+        "    Page groups (chunks):    1\n"
+        "    Passages:                1\n"
+        "    Pages read by OCR:       0\n"
+        "  TSIB (Transport Safety Investigation Bureau, Singapore):\n"
+        "    Reports:                 1\n"
+        "      Report: 1\n"
+        "    Reports with a PDF link: 1\n"
+        "    Reports read from their web page (no PDF): 0\n"
+        "    Page groups (chunks):    1\n"
+        "    Passages:                1\n"
+        "    Pages read by OCR:       0\n"
+        "  All publishers:\n"
+        "    Reports:                 4\n"
+        "    Reports with a PDF link: 3\n"
+        "    Reports read from their web page (no PDF): 1\n"
+        "    Page groups (chunks):    4\n"
+        "    Passages:                5\n"
+        "    Pages read by OCR:       0\n"
+    )
+    # Results that could not be read are listed under one heading, publisher by publisher.
+    dropped = out.split("Left out of the listing because they could not be read (3):\n")[1]
+    dropped = dropped.split("\n\n")[0]
+    assert dropped.splitlines() == [
+        "  MAIB (1):",
+        "    - Unread maib result: page request failed",
+        "      https://reports.example.test/maib-unread",
+        "  NTSB (1):",
+        "    - Unread ntsb result: page request failed",
+        "      https://reports.example.test/ntsb-unread",
+        "  TSIB (1):",
+        "    - Unread tsib result: page request failed",
+        "      https://reports.example.test/tsib-unread",
+    ]
+    assert "Out of scope, left out:\n  MAIB: 1 (fishing vessel 1)\n  NTSB: 1" in out
+
+
+@pytest.fixture
+def no_request(monkeypatch):
+    """Fails the test if ingest opens an HTTP client or lists anything."""
+    def refuse(*args, **kwargs):
+        raise AssertionError("a request was about to be made")
+
+    monkeypatch.setattr(cli.httpx, "Client", refuse)
+    for name in ("list_merchant_reports", "list_ntsb_reports", "list_tsib_reports"):
+        monkeypatch.setattr(cli, name, refuse)
+
+
+def test_ingest_atsb_is_refused_before_any_request(no_request, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(["ingest", "--source", "atsb"]) == 1
+
+    captured = capsys.readouterr()
+    assert "ATSB reports are not available yet" in captured.err
+    assert "Traceback" not in captured.out + captured.err
+    assert not (tmp_path / "data").exists()
+
+
+def test_ingest_ntsb_without_export_is_refused(no_request, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(["ingest", "--source", "ntsb"]) == 1
+
+    err = capsys.readouterr().err
+    assert cli.NTSB_NEEDS_EXPORT in err
+    assert "https://my.ntsb.gov/basic" in err
+    assert "--ntsb-export PATH" in err
+    assert not (tmp_path / "data").exists()
+
+
+@pytest.mark.parametrize(
+    "args, message",
+    [
+        (["--source", "ntsb", "--ntsb-export", "missing.json"], "No CAROL export at missing.json"),
+        (["--source", "all", "--ntsb-export", "missing.json"], "No CAROL export at missing.json"),
+        (["--ntsb-export", "carol.json"], "--ntsb-export is used only with --source ntsb or all"),
+    ],
+)
+def test_ingest_refuses_a_misused_ntsb_export_before_any_request(
+    no_request, monkeypatch, tmp_path, capsys, args, message
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "carol.json").write_text("{}")
+
+    assert cli.main(["ingest", *args]) == 1
+
+    assert message in capsys.readouterr().err
+
+
+def test_ingest_all_without_ntsb_export_skips_ntsb_and_carries_on(ingest_offline, capsys):
+    assert cli.main(["ingest", "--source", "all"]) == 0
+
+    assert listed(ingest_offline.events) == ["maib", "tsib"]
+    out = capsys.readouterr().out
+    assert f"Skipping NTSB. {cli.NTSB_NEEDS_EXPORT}" in out
+    assert out.index("Skipping NTSB") < out.index("Listing MAIB reports")
+    with Store(ingest_offline.data / "telltale.sqlite") as store:
+        assert store.sources() == ["maib", "tsib"]
+
+
+def test_ingest_all_carries_on_past_a_failed_listing(ingest_offline, monkeypatch, capsys):
+    def failing_list(client, *, limit=None, on_skip=None):
+        ingest_offline.events.append(("list", "tsib", limit, None))
+        request = httpx.Request("GET", "https://www.mot.gov.sg/")
+        raise httpx.ConnectError("refused", request=request)
+
+    monkeypatch.setattr(cli, "list_tsib_reports", failing_list)
+
+    assert cli.main(["ingest", "--source", "all", "--ntsb-export", str(ingest_offline.export)]) == 1
+
+    assert listed(ingest_offline.events) == ["maib", "ntsb", "tsib"]
+    captured = capsys.readouterr()
+    assert "Search index saved" in captured.out
+    assert "Could not list TSIB reports: ConnectError" in captured.err
+    with Store(ingest_offline.data / "telltale.sqlite") as store:
+        assert store.sources() == ["maib", "ntsb"]
+
+
+def test_serve_footer_names_every_publisher_in_the_store(no_uvicorn, monkeypatch, tmp_path: Path):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "embedder", lambda data_dir: HashEmbedder())
+    with Store(tmp_path / "data" / "telltale.sqlite") as store:
+        store.upsert_report(report("test-report-alpha", PDF_URL))
+        store.upsert_report(publisher_report("ntsb-report-bravo", "ntsb"))
+        store.replace_chunks("ntsb-report-bravo", [(4, ["The bosun entered the tank."])])
+        HybridIndex.build(store.chunks(), HashEmbedder()).save(tmp_path / "data" / "index")
+
+    assert cli.main(["serve"]) == 0
+
+    [call] = no_uvicorn
+    page = TestClient(call["app"]).get("/").text
+    assert "Reports: UK MAIB, Crown copyright; US NTSB, US Government work." in page
+
+
+def test_ingest_pauses_before_each_ntsb_and_tsib_download(ingest_offline, monkeypatch):
+    monkeypatch.setattr(cli, "_sleep", lambda seconds: ingest_offline.events.append(("sleep", seconds)))
+
+    assert cli.main(
+        ["ingest", "--source", "all", "--ntsb-export", str(ingest_offline.export)]
+    ) == 0
+
+    assert [e for e in ingest_offline.events if e[0] in ("sleep", "download")] == [
+        ("download", "maib-report-alpha"),
+        ("sleep", 1.5),
+        ("download", "ntsb-report-alpha"),
+        ("sleep", 1.0),
+        ("download", "tsib-report-alpha"),
+    ]
+
+
+def test_ingest_does_not_pause_for_a_pdf_already_downloaded(ingest_offline, monkeypatch):
+    from telltale.ingest.download import pdf_path
+
+    monkeypatch.setattr(cli, "_sleep", lambda seconds: ingest_offline.events.append(("sleep", seconds)))
+    kept = pdf_path(publisher_report("tsib-report-alpha", "tsib"), ingest_offline.data / "pdf")
+    kept.parent.mkdir(parents=True)
+    write_text_pdf(kept, "Kept from an earlier run.")
+
+    assert cli.main(["ingest", "--source", "tsib"]) == 0
+
+    assert ("sleep", 1.0) not in ingest_offline.events
+
+
+def test_ingest_all_does_not_count_a_failed_listing_as_out_of_scope(
+    ingest_offline, monkeypatch, capsys
+):
+    def failing_list(client, *, limit=None, on_skip=None):
+        request = httpx.Request("GET", "https://www.mot.gov.sg/")
+        raise httpx.ConnectError("refused", request=request)
+
+    monkeypatch.setattr(cli, "list_tsib_reports", failing_list)
+
+    assert cli.main(["ingest", "--source", "all", "--ntsb-export", str(ingest_offline.export)]) == 1
+
+    out = capsys.readouterr().out
+    left_out = out.split("Out of scope, left out:\n")[1].split("\n\n")[0]
+    assert left_out.splitlines() == [
+        "  MAIB: 1 (fishing vessel 1)",
+        "  NTSB: 1 (fishing vessel 1)",
+        "  TSIB: listing failed",
+    ]
+
+
+def test_ingest_all_prints_what_was_left_out_before_every_listing_fails(
+    ingest_offline, monkeypatch, capsys
+):
+    def failing(source):
+        def fake(client, *, limit=None, on_skip=None, export_path=None):
+            on_skip(SkippedReport(
+                f"{source}-unread", f"Unread {source} result",
+                f"https://reports.example.test/{source}-unread", "page request failed",
+                dropped=True,
+            ))
+            on_skip(SkippedReport(f"{source}-out", "Out", "", "fishing vessel", dropped=False))
+            raise cli.ListingError(f"{source} pages in a row could not be read")
+        return fake
+
+    for name, source in (
+        ("list_merchant_reports", "maib"), ("list_ntsb_reports", "ntsb"),
+        ("list_tsib_reports", "tsib"),
+    ):
+        monkeypatch.setattr(cli, name, failing(source))
+
+    assert cli.main(["ingest", "--source", "all", "--ntsb-export", str(ingest_offline.export)]) == 1
+
+    captured = capsys.readouterr()
+    assert "Could not list TSIB reports: tsib pages in a row" in captured.err
+    dropped = captured.out.split(
+        "Left out of the listing because they could not be read (3):\n"
+    )[1].split("\n\n")[0]
+    assert "https://reports.example.test/ntsb-unread" in dropped
+    assert (
+        "Out of scope, left out:\n  MAIB: 1 (fishing vessel 1) before the listing failed"
+    ) in captured.out
+    assert "Building the search index" not in captured.out
+
+
+def test_ingest_of_one_publisher_gives_no_all_publishers_total(ingest_offline, capsys):
+    assert cli.main(["ingest", "--source", "tsib"]) == 0
+
+    out = capsys.readouterr().out
+    assert "  TSIB (Transport Safety Investigation Bureau, Singapore):" in out
+    assert "All publishers" not in out
+
+
+def test_ask_refuses_a_model_with_no_thinking_off_setting_before_the_index(
+    ask_offline, monkeypatch, tmp_path: Path, capsys
+):
+    settings = Settings(anthropic_api_key="test-key", data_dir=tmp_path, model="claude-unlisted-test")
+    monkeypatch.setattr(cli, "load_settings", lambda *a, **k: settings)
+
+    def no_index(data_dir):
+        raise AssertionError("the index must not be loaded")
+
+    monkeypatch.setattr(cli, "load_index", no_index)
+
+    assert cli.main(["ask", "entering a ballast tank"]) == 1
+
+    err = capsys.readouterr().err
+    assert "claude-unlisted-test" in err
+    assert "THINKING_OFF in telltale/thinking.py" in err
+
+
+def test_serve_refuses_a_model_with_no_thinking_off_setting_before_the_index(
+    no_uvicorn, monkeypatch, tmp_path: Path, capsys
+):
+    settings = Settings(anthropic_api_key="test-key", data_dir=tmp_path, model="claude-unlisted-test")
+    monkeypatch.setattr(cli, "load_settings", lambda *a, **k: settings)
+
+    def no_index(data_dir):
+        raise AssertionError("the index must not be loaded")
+
+    monkeypatch.setattr(cli, "load_index", no_index)
+
+    assert cli.main(["serve"]) == 1
+
+    err = capsys.readouterr().err
+    assert "claude-unlisted-test" in err
+    assert "THINKING_OFF in telltale/thinking.py" in err
+    assert no_uvicorn == []
+
+
+def test_eval_public_set_without_a_store_says_so_and_creates_none(
+    eval_offline, tmp_path: Path, capsys
+):
+    (tmp_path / cli.STORE_FILE).unlink()
+
+    assert cli.main(["eval-public-set", "--out", str(tmp_path / "test-set.md")]) == 1
+
+    assert f"No report store at {tmp_path / cli.STORE_FILE}" in capsys.readouterr().err
+    assert not (tmp_path / cli.STORE_FILE).exists()
+    assert not (tmp_path / "test-set.md").exists()
+
+
+def test_eval_public_set_help_says_titles_link_to_the_publishers_page(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["eval-public-set", "--help"])
+
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "the publisher's page for each report" in help_text
+    assert "GOV.UK" not in help_text

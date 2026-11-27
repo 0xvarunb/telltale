@@ -320,7 +320,8 @@ def test_to_json_saves_the_report_slug_of_each_chunk_searched():
     result.chunks = [Chunk(id=1, report_slug="slug-x", report_title="Report x", url=PDF_A, page=2,
                            passages=["x"])]
     assert json.loads(card.to_json(result))["searched"] == [
-        {"report_title": "Report x", "page": 2, "source": f"{PDF_A}#page=2", "report_slug": "slug-x"}
+        {"report_title": "Report x", "page": 2, "source": f"{PDF_A}#page=2", "report_slug": "slug-x",
+         "source_id": "maib"}
     ]
 
 
@@ -331,3 +332,93 @@ def test_two_reports_with_the_same_title_stay_apart_when_slugs_are_saved():
     ]
     reports = card.searched_from_json(saved_json(NO_ANSWER_RESULT, searched))
     assert [(r.title, r.page) for r in reports] == [("Same title", 1), ("Same title", 2)]
+
+
+# Each source's publisher is credited in the footer.
+
+ATSB_PDF = "https://www.atsb.gov.au/test/report-charlie.pdf"
+CHARLIE = Citation(report_title="Test report charlie", source=f"{ATSB_PDF}#page=2",
+                   cited_text="Charlie.", source_id="atsb")
+TWO_PUBLISHERS = make_answer([
+    Sentence(text="On the test vessel Alpha, the tank had not been ventilated.", citations=[ALPHA]),
+    Sentence(text="On the test vessel Charlie, the hatch was left open.", citations=[CHARLIE]),
+])
+
+
+def test_card_footer_names_every_publisher_cited(tmp_path: Path):
+    both = card.render(TWO_PUBLISHERS, tmp_path / "both.png")
+    maib_only = card.render(ANSWER, tmp_path / "maib.png")
+    # Only the sources on the card are credited.
+    chosen = card.render(TWO_PUBLISHERS, tmp_path / "chosen.png", selection=[1])
+
+    assert "Reports: UK MAIB, Crown copyright; ATSB, CC BY 4.0" in both.text
+    assert "Reports: UK MAIB, Crown copyright" in maib_only.text
+    assert not any("ATSB" in t for t in maib_only.text)
+    assert "Reports: UK MAIB, Crown copyright" in chosen.text
+    assert not any("ATSB" in t for t in chosen.text)
+
+
+def test_saved_answer_keeps_each_citation_publisher():
+    import json
+
+    saved = card.to_json(TWO_PUBLISHERS)
+
+    assert [c["source_id"] for s in json.loads(saved)["sentences"] for c in s["citations"]] == [
+        "maib", "atsb"
+    ]
+    assert card.from_json(saved).sentences == TWO_PUBLISHERS.sentences
+
+
+def test_an_older_saved_answer_reads_as_maib(tmp_path: Path):
+    import json
+
+    data = json.loads(card.to_json(ANSWER))
+    for sentence in data["sentences"]:
+        for citation in sentence["citations"]:
+            del citation["source_id"]
+
+    again = card.from_json(json.dumps(data))
+
+    assert {c.source_id for s in again.sentences for c in s.citations} == {"maib"}
+    drawn = card.render(again, tmp_path / "card.png")
+    assert "Reports: UK MAIB, Crown copyright" in drawn.text
+
+
+def test_a_card_with_nothing_from_a_report_keeps_the_maib_credit(tmp_path: Path):
+    from telltale.answer.brief import REFUSED
+
+    refused = make_answer([Sentence(text=NO_ANSWER, citations=[])], stop_reason="refusal")
+    unsourced = make_answer([Sentence(text="A crew member collapsed at the ladder.", citations=[])])
+    old_no_answer = card.from_json(saved_json(NO_ANSWER_RESULT, None))
+
+    notice_only = card.render(refused, tmp_path / "refused.png")
+    no_source = card.render(unsourced, tmp_path / "unsourced.png")
+    old = card.render(old_no_answer, tmp_path / "old.png", searched=[])
+
+    assert REFUSED in notice_only.text
+    for drawn in (notice_only, no_source, old):
+        assert "Reports: UK MAIB, Crown copyright" in drawn.text
+
+
+def test_a_saved_no_answer_credits_the_publisher_of_each_report_searched(tmp_path: Path):
+    import json
+
+    from telltale.models import Chunk
+
+    result = make_answer([Sentence(text=NO_ANSWER, citations=[])])
+    result.chunks = [Chunk(id=1, report_slug="ntsb-slug-y", report_title="Report y",
+                           url="https://www.ntsb.gov/test/report-y.pdf", page=3,
+                           passages=["y"], source_id="ntsb")]
+    saved = card.to_json(result)
+
+    assert [item["source_id"] for item in json.loads(saved)["searched"]] == ["ntsb"]
+    reports = card.searched_from_json(saved)
+    assert [r.source_id for r in reports] == ["ntsb"]
+    drawn = card.render(card.from_json(saved), tmp_path / "card.png", searched=reports)
+    assert "Reports: US NTSB, US Government work" in drawn.text
+    assert not any("Crown copyright" in t for t in drawn.text)
+
+
+def test_searched_reports_saved_before_publishers_read_as_maib():
+    reports = card.searched_from_json(saved_json(NO_ANSWER_RESULT, SEARCHED))
+    assert {r.source_id for r in reports} == {"maib"}

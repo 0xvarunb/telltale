@@ -26,6 +26,7 @@ from telltale.answer import (
 from telltale.answer.brief import REPORTS_SEARCHED
 from telltale.ingest.store import OCR_NOTE
 from telltale.models import Answer, Chunk, Citation, Sentence
+from telltale.sources.registry import publisher
 
 SCALE = 2
 WIDTH, HEIGHT = 1080, 1350
@@ -37,7 +38,6 @@ RULE = (217, 210, 195)
 ORANGE = (200, 68, 26)
 GREEN = (47, 107, 74)
 WHITE = (255, 255, 255)
-CROWN_COPYRIGHT = "Reports: UK MAIB, Crown copyright"
 MIN_BODY_SIZE = 22
 MAX_BODY_SIZE = 40
 SEARCHED_LABEL = "REPORTS SEARCHED (CLOSEST FIRST)"
@@ -61,10 +61,13 @@ class Line:
 
 @dataclass
 class Searched:
-    """A report searched for a no-answer result: its title and page, nothing more."""
+    """A report searched for a no-answer result: its title and page, and its publisher for the
+    footer credit."""
 
     title: str
     page: int | None
+    # Answers saved before publishers were recorded have none; every report then was MAIB's.
+    source_id: str = "maib"
 
 
 @dataclass
@@ -83,12 +86,14 @@ class View:
     lines: list[Line]
     sources: dict[int, tuple[str, int | None, str]]  # number -> (title, page, link)
     notice: str | None
+    publishers: dict[int, str] = field(default_factory=dict)  # number -> publisher id
 
 
 def view(result: Answer) -> View:
     """Number sentences and sources exactly as `telltale ask` prints them."""
     numbers: dict[str, int] = {}
     details: dict[int, tuple[str, int | None, str]] = {}
+    publishers: dict[int, str] = {}
     notice, notice_only = stop_notice(result)
     lines: list[Line] = []
     if not notice_only:
@@ -101,11 +106,12 @@ def view(result: Answer) -> View:
             for citation in sentence.citations:
                 number = numbers.setdefault(citation.source, len(numbers) + 1)
                 details.setdefault(number, (citation.report_title, citation.page, citation.source))
+                publishers.setdefault(number, citation.source_id)
                 if number not in refs:
                     refs.append(number)
             n += 1
             lines.append(Line(n, sentence.text, refs))
-    return View(lines=lines, sources=details, notice=notice)
+    return View(lines=lines, sources=details, notice=notice, publishers=publishers)
 
 
 # Saving an answer, so a card can be redrawn later without asking (and paying) again.
@@ -118,7 +124,12 @@ def to_json(result: Answer) -> str:
             {
                 "text": s.text,
                 "citations": [
-                    {"report_title": c.report_title, "source": c.source, "cited_text": c.cited_text}
+                    {
+                        "report_title": c.report_title,
+                        "source": c.source,
+                        "cited_text": c.cited_text,
+                        "source_id": c.source_id,
+                    }
                     for c in s.citations
                 ],
             }
@@ -136,6 +147,7 @@ def to_json(result: Answer) -> str:
                 "page": c.source_page,
                 "source": c.source,
                 "report_slug": c.report_slug,
+                "source_id": c.source_id,
             }
             for c in result.chunks
         ],
@@ -171,13 +183,28 @@ def searched_from_json(text: str) -> list[Searched]:
     for item in json.loads(text).get("searched") or []:
         title = item["report_title"]
         key = item.get("report_slug") or title.removesuffix(OCR_NOTE)
-        first.setdefault(key, Searched(title=title, page=item.get("page")))
+        first.setdefault(
+            key,
+            Searched(
+                title=title, page=item.get("page"), source_id=item.get("source_id", "maib")
+            ),
+        )
     return list(first.values())
 
 
 def searched_from_chunks(chunks: list[Chunk]) -> list[Searched]:
     """The reports searched, from the retrieved chunks, as the command line lists them."""
-    return [Searched(title=c.report_title, page=c.source_page) for c in reports_searched(chunks)]
+    return [
+        Searched(title=c.report_title, page=c.source_page, source_id=c.source_id)
+        for c in reports_searched(chunks)
+    ]
+
+
+def footer_credit(source_ids: list[str]) -> str | None:
+    """"Reports: " and the footer credit of each publisher, once each, in the order given; None
+    when the list is empty."""
+    credits = [publisher(source_id).footer_credit for source_id in dict.fromkeys(source_ids)]
+    return "Reports: " + "; ".join(credits) if credits else None
 
 
 def parse_selection(spec: str | None, highest: int) -> list[int] | None:
@@ -472,7 +499,14 @@ def render(
     logo = logo.resize((logo_w, int(logo.height * logo_w / logo.width)), Image.Resampling.LANCZOS)
     image.paste(logo, (m - 8 * SCALE, y), logo)
     small = _sans(17)
-    right = [f"Cost of this answer: ${result.cost_usd:.4f}", CROWN_COPYRIGHT]
+    right = [f"Cost of this answer: ${result.cost_usd:.4f}"]
+    # A card with nothing from a report still carries the MAIB credit, as every card did before
+    # other publishers were added.
+    credit = footer_credit(
+        [v.publishers[n] for line in lines for n in line.sources]
+        + [report.source_id for report in reports]
+    ) or footer_credit(["maib"])
+    right.append(credit)
     ty = y + 6 * SCALE
     for text in right:
         draw.text((w - m - _width(small, text), ty), text, font=small, fill=MUTED)

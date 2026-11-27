@@ -16,6 +16,9 @@ class ReportMeta:
     vessel_types: list[str]
     report_type: str
     pdf_url: str | None
+    # The publisher's id in `telltale.sources.registry.PUBLISHERS`. Slugs of other publishers
+    # start with their id and a hyphen (`ntsb-...`); MAIB slugs have no prefix.
+    source: str = "maib"
     # The GOV.UK page body (HTML) of a report published with no PDF; not kept in the store.
     page_html: str | None = None
 
@@ -33,6 +36,8 @@ class Chunk:
     ocr: bool = False
     # True when the text comes from the GOV.UK page, which has no page numbers.
     web_page: bool = False
+    # The report's publisher id (`ReportMeta.source`); `source` below is the passage's link.
+    source_id: str = "maib"
 
     @property
     def source(self) -> str:
@@ -49,6 +54,9 @@ class Citation:
     report_title: str
     source: str
     cited_text: str
+    # The cited report's publisher id (`Chunk.source_id`). Answers saved before publishers were
+    # recorded have none, and every report then was MAIB's.
+    source_id: str = "maib"
 
     @property
     def page(self) -> int | None:

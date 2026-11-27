@@ -1,8 +1,10 @@
 """Hybrid search: BM25 keywords and embeddings, each keeping its top 40, fused by RRF."""
 
+import hashlib
 import json
 import os
 import re
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +17,7 @@ TOP_N = 40
 VECTORS_FILE = "vectors.npy"
 IDS_FILE = "chunk_ids.json"
 META_FILE = "index_meta.json"
+CACHE_FILE = "embed_cache.npz"
 
 _WORD = re.compile(r"\w+")
 
@@ -35,6 +38,69 @@ def index_text(chunk: Chunk) -> str:
 def embedder_name(embedder: Embedder) -> str:
     """The embedding model's name (`model` attribute), else the embedder's class name."""
     return str(getattr(embedder, "model", None) or type(embedder).__name__)
+
+
+def text_hash(text: str) -> str:
+    """The key a saved embedding is kept under: sha256 of the exact index text."""
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _groups(n: int, kind: str = "") -> str:
+    return f"{n:,} {kind}page group" + ("" if n == 1 else "s")
+
+
+def _read_cache(path: Path, model: str, dim: int | None) -> tuple[dict[str, np.ndarray], str]:
+    """Saved vectors by text hash, or an empty dict and the reason none can be reused.
+
+    Never raises for a bad file: a missing, unreadable, malformed or other-model cache only
+    means everything is embedded again.
+    """
+    if not path.exists():
+        return {}, "No saved embeddings to reuse"
+    unreadable = {}, f"Saved embeddings in {path} could not be read"
+    try:
+        saved = np.load(path, allow_pickle=False)
+    except (OSError, ValueError, EOFError, zipfile.BadZipFile):
+        return unreadable
+    if not isinstance(saved, np.lib.npyio.NpzFile):  # a plain .npy array has no named arrays
+        return unreadable
+    try:
+        with saved:
+            saved_model, hashes, vectors = saved["model"], saved["hashes"], saved["vectors"]
+    except (OSError, ValueError, EOFError, KeyError, zipfile.BadZipFile):
+        return unreadable
+    if saved_model.ndim != 0 or saved_model.dtype.kind != "U":
+        return unreadable
+    if str(saved_model) != model:
+        return {}, "Saved embeddings are from another model"
+    well_formed = (
+        hashes.ndim == 1
+        and hashes.dtype.kind == "U"
+        and vectors.ndim == 2
+        and vectors.dtype.kind == "f"
+        and len(hashes) == len(vectors)
+        and (vectors.shape[1] > 0 or len(vectors) == 0)
+        and (dim is None or len(vectors) == 0 or vectors.shape[1] == dim)
+    )
+    if not well_formed:
+        return unreadable
+    vectors = vectors.astype(np.float32, copy=False)
+    return {str(h): vectors[i] for i, h in enumerate(hashes)}, ""
+
+
+def _write_cache(path: Path, model: str, hashes: list[str], vectors: np.ndarray) -> None:
+    """One file, replaced whole, so a save cut short never pairs one run's hashes with another
+    run's vectors. Strings are fixed-width unicode so it loads with `allow_pickle=False`."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_atomic(
+        path,
+        lambda f: np.savez(
+            f,
+            model=np.array(model, dtype=str),
+            hashes=np.array(hashes, dtype=str),
+            vectors=vectors.astype(np.float32, copy=False),
+        ),
+    )
 
 
 def _write_atomic(path: Path, write) -> None:
@@ -68,11 +134,62 @@ class HybridIndex:
         self._bm25 = BM25Okapi(corpus) if any(corpus) else None
 
     @classmethod
-    def build(cls, chunks: list[Chunk], embedder: Embedder) -> "HybridIndex":
+    def build(
+        cls, chunks: list[Chunk], embedder: Embedder, cache_dir: Path | None = None
+    ) -> "HybridIndex":
+        """Embed every chunk and index it. With `cache_dir`, reuse the vector saved there for any
+        chunk whose exact index text was embedded before by the same model, embed only the rest,
+        then save the vectors of the current chunks (and no others) for the next build."""
         if not chunks:
             return cls([], np.zeros((0, 0), dtype=np.float32), embedder)
-        vectors = np.asarray(embedder.embed([index_text(c) for c in chunks]), dtype=np.float32)
-        return cls(list(chunks), vectors, embedder)
+        texts = [index_text(c) for c in chunks]
+        if cache_dir is None:
+            vectors = np.asarray(embedder.embed(texts), dtype=np.float32)
+            return cls(list(chunks), vectors, embedder)
+
+        model = embedder_name(embedder)
+        hashes = [text_hash(t) for t in texts]
+        cached, why_not = _read_cache(cache_dir / CACHE_FILE, model, getattr(embedder, "dim", None))
+        if why_not:
+            print(f"{why_not}; embedding all {_groups(len(chunks))}.", flush=True)
+        else:
+            new = sum(h not in cached for h in hashes)
+            rest = f"embedding {_groups(new, 'new ')}" if new else "no new page groups to embed"
+            print(f"Reused {len(hashes) - new:,} saved embeddings; {rest}.", flush=True)
+        found = cls._embed_missing(embedder, texts, hashes, cached)
+        if found is None:  # same model name, but its vectors no longer have the saved width
+            print(
+                f"Saved embeddings have another width; embedding all {_groups(len(chunks))}.",
+                flush=True,
+            )
+            found = cls._embed_missing(embedder, texts, hashes, {})
+        assert found is not None  # nothing cached, so the widths cannot disagree
+        # One row per distinct text, current chunks only, so the cache never grows with texts
+        # that have left the store.
+        _write_cache(cache_dir / CACHE_FILE, model, list(found), np.stack(list(found.values())))
+        return cls(list(chunks), np.stack([found[h] for h in hashes]), embedder)
+
+    @staticmethod
+    def _embed_missing(
+        embedder: Embedder, texts: list[str], hashes: list[str], cached: dict[str, np.ndarray]
+    ) -> dict[str, np.ndarray] | None:
+        """A vector for every distinct text, by hash, in chunk order: the cached one where there
+        is one, the rest from one `embed` call. None if the new and saved widths differ."""
+        missing: dict[str, str] = {}
+        for h, t in zip(hashes, texts):
+            if h not in cached:
+                missing.setdefault(h, t)
+        fresh: dict[str, np.ndarray] = {}
+        if missing:
+            rows = np.asarray(embedder.embed(list(missing.values())), dtype=np.float32)
+            if rows.ndim != 2 or len(rows) != len(missing):
+                raise SearchIndexError(
+                    f"the embedder returned {len(rows)} rows for {len(missing)} texts"
+                )
+            if cached and next(iter(cached.values())).shape[0] != rows.shape[1]:
+                return None  # every saved row has one width; `_read_cache` checked it
+            fresh = dict(zip(missing, rows))
+        return {h: cached[h] if h in cached else fresh[h] for h in dict.fromkeys(hashes)}
 
     def save(self, dir: Path) -> None:
         """Write vectors, then `index_meta.json` (model name and dimension), then the chunk ids.

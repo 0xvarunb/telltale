@@ -114,6 +114,7 @@ def _chunk(n: int, item: dict) -> Chunk:
         passages=[],
         ocr=title.endswith(OCR_NOTE),
         web_page=web_page,
+        source_id=item.get("source_id", "maib"),
     )
 
 

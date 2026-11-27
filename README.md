@@ -1,16 +1,17 @@
 # Telltale
 
 Telltale tells officers on merchant ships what went wrong on other ships doing the same job,
-from published accident investigation reports (stage 1: UK MAIB merchant-ship reports). Each
-sentence of its answer links to the report passage it cites, or is marked "no source".
+from published accident investigation reports (now in stage 3: merchant-ship reports from UK
+MAIB, US NTSB and Singapore TSIB). Each sentence of its answer links to the report passage it cites, or is marked "no source".
 
 ## Rule 0: the tool never invents a fact
 
 Answers use only the report passages the search finds. The model is told to add nothing from its
 own knowledge: no procedures, regulations or figures it was not given. If the reports do not cover
-the job, it says there is no reliable answer in these reports. In stage 1 a sentence without a
-source is marked, not yet removed; removing it is stage 3. It never says a job is safe and never
-replaces the permit to work, the risk assessment, the SMS or the office's permission.
+the job, it says there is no reliable answer in these reports. Today a sentence without a source
+is marked "no source", not removed; removing it is planned within stage 3 and is not built yet.
+It never says a job is safe and never replaces the permit to work, the risk assessment, the SMS
+or the office's permission.
 
 What it can't do: [docs/limits.md](docs/limits.md) (also at `/limits` on the local page).
 
@@ -37,12 +38,40 @@ to the current folder.
    uv run telltale ingest
    ```
 
-   This needs internet access to www.gov.uk and assets.publishing.service.gov.uk, and, the first
-   time, to huggingface.co for the embedding model, which is then kept in `data/models` for
+   This needs internet access to the hosts of each publisher it reads: www.gov.uk and
+   assets.publishing.service.gov.uk (MAIB), www.ntsb.gov (NTSB investigation pages and PDFs), and
+   www.mot.gov.sg and isomer-user-content.by.gov.sg (TSIB listing and PDFs). The first time, it
+   also needs huggingface.co for the embedding model, which is then kept in `data/models` for
    offline use. It makes one request per report, so the full run takes a while; `--limit N`
-   stops after N reports. It is safe to re-run: PDFs already downloaded are kept. At the end it
-   prints the counts and lists every report it could not make searchable, with its page link
-   where it has one.
+   stops after N reports. It is safe to re-run: PDFs already downloaded are kept. A re-run also
+   reuses the saved embedding of any page group whose text has not changed, so only new or changed
+   reports are embedded. At the end it prints the counts and lists every report it could not make
+   searchable, with its page link where it has one.
+
+   By itself, `ingest` downloads UK MAIB reports. `--source` picks another publisher:
+
+   ```
+   uv run telltale ingest --source tsib
+   uv run telltale ingest --source ntsb --ntsb-export path/to/carol.json
+   uv run telltale ingest --source all --ntsb-export path/to/carol.json
+   ```
+
+   - `maib` (the default): UK Marine Accident Investigation Branch.
+   - `tsib`: Singapore Transport Safety Investigation Bureau, listed from www.mot.gov.sg, with
+     each PDF from isomer-user-content.by.gov.sg.
+   - `ntsb`: US National Transportation Safety Board. NTSB's search (CAROL) cannot be read by a
+     script without a key, so you save its results once in a browser: open
+     https://my.ntsb.gov/basic, search in Marine mode with no other filter, press "Download Data
+     (JSON)", and pass the saved file with `--ntsb-export`. Each report's page and PDF then come
+     from www.ntsb.gov.
+   - `all`: MAIB, then NTSB, then TSIB. Without `--ntsb-export` it says so, skips NTSB and carries
+     on with the others.
+   - `atsb` (Australia) is not available yet: its website refuses scripted requests, so `ingest`
+     refuses it before making any request.
+
+   With `all`, `--limit N` stops after N reports from each publisher. Whatever the source, the
+   search index is rebuilt from every report in the store, and the counts at the end are given
+   for each publisher and in total.
    Everything it stores goes in `data/` (`data/telltale.sqlite`, `data/pdf/`, `data/index/`, `data/ocr/`),
    which is git-ignored.
 
@@ -119,21 +148,27 @@ to the current folder.
 
    It writes a new run folder named after the source run, as one batch at half the price.
 
-   The question file (`docs/private/eval/questions.json`) is not in this repository. The 50
-   questions and their expected reports are kept private so the tool can't be tuned to them, and
-   17 of them are held back for one final run (`--final`). Without the file, `telltale eval` stops
-   before asking anything.
+   The question file (`docs/private/eval/questions.json`) is not in this repository. The 33
+   working questions and their chosen reports are published in [docs/test-set.md](docs/test-set.md);
+   the other 17 are held back for one final run (`--final`) and never published, so the tool can't
+   be tuned to them. Without the file, `telltale eval` stops before asking anything.
 
 Tests: `uv run pytest`. They make no network calls and need no API key.
 
 ## Data credit
 
-Report text: UK Marine Accident Investigation Branch (MAIB) reports (investigation reports, safety
-bulletins and preliminary examinations), published on
-GOV.UK. Crown copyright, used under the
-[Open Government Licence v3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
+Report text comes from three publishers:
+
+- UK Marine Accident Investigation Branch (MAIB): investigation reports, safety bulletins and
+  preliminary examinations, published on GOV.UK. Crown copyright, used under the
+  [Open Government Licence v3.0](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
+- US National Transportation Safety Board (NTSB): marine accident reports and briefs, published
+  on www.ntsb.gov. US Government work, not subject to copyright in the US.
+- Transport Safety Investigation Bureau, Singapore (TSIB): final reports listed on the Ministry
+  of Transport's website, www.mot.gov.sg. Public reports, each cited and linked to its PDF.
+
 No report PDFs or report text are kept in this repository; `telltale ingest` downloads them from
-GOV.UK. Report photographs and figures are not used.
+each publisher's own site. Report photographs and figures are not used.
 
 ## Build log
 
@@ -142,8 +177,8 @@ The public build log (every change, why it was made, and what it measured) is th
 
 ## Licence
 
-The code is under the MIT licence (`LICENSE`). The MAIB reports are not part of this repository
-and keep their own licence, above.
+The code is under the MIT licence (`LICENSE`). The MAIB, NTSB and TSIB reports are not part of
+this repository and keep their own terms, above.
 
 ## Skills map
 
@@ -160,6 +195,7 @@ Telltale is built in six stages, one AI skill per stage, each posted on LinkedIn
 
 The concepts used so far are explained in plain English in [docs/concepts.md](docs/concepts.md).
 Stage 1 results: [docs/stage-1-results.md](docs/stage-1-results.md). Stage 2 results:
-[docs/stage-2-results.md](docs/stage-2-results.md). Stage 2 plan:
+[docs/stage-2-results.md](docs/stage-2-results.md). Test set: [docs/test-set.md](docs/test-set.md).
+Stage 2 plan:
 [docs/plans/2026-11-19-stage-2-evals.md](docs/plans/2026-11-19-stage-2-evals.md). Build log:
 https://telltale-log.vercel.app/ (early entries also in [docs/build-log.md](docs/build-log.md)).

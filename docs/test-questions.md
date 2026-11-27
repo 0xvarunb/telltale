@@ -3,8 +3,9 @@
 The stage 2 test set was written on 19 Nov 2026: 50 questions, each a job an officer would ask about
 before starting it, from the engine room, the deck, the bridge and cargo work. For 27 of them the
 reports that should come up were chosen before the question was asked; for 23 the right answer is
-that the reports don't cover the job. The set is kept private so the tool can't be tuned to it, and
-17 questions are held back for one final run at the end of the stage.
+that the reports don't cover the job. The 33 working questions, with their chosen reports, are
+published in [test-set.md](test-set.md). The other 17 are held back for one final run at the end of
+stage 3 and never published, so the tool can't be tuned to them.
 
 The questions below came before the set: the three used to tune the stage 1 prompt (so none of them
 is a held-out question) and the first reader's question.

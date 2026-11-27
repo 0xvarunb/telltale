@@ -407,3 +407,15 @@ def test_totals_of_nothing_is_zero():
     assert run.fact_sentences == 0
     assert run.unsupported_share == 0.0
     assert run.answer_cost_usd == 0.0
+
+
+def test_answer_from_saved_keeps_the_publisher_of_each_report_searched():
+    ntsb = {**searched("Report N", f"{PDF_B}#page=5", "ntsb-slug-n", 5), "source_id": "ntsb"}
+    result = answer_from_saved(
+        saved(
+            [sentence(NO_ANSWER)],
+            searched_=[searched("Report A", f"{PDF_A}#page=3", "slug-a", 3), ntsb],
+        )
+    )
+    # An entry saved before publishers were recorded reads as MAIB.
+    assert [c.source_id for c in result.chunks] == ["maib", "ntsb"]

@@ -1,14 +1,17 @@
+import hashlib
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from helpers import HashEmbedder
+from helpers import CountingEmbedder, HashEmbedder
 from telltale.models import Chunk
 from telltale.search import HybridIndex, SearchIndexError, rrf
+from telltale.search.index import CACHE_FILE, index_text
 
 PDF_URL = "https://assets.publishing.service.gov.uk/media/test/report.pdf"
 
@@ -193,3 +196,184 @@ def test_load_wraps_corrupt_files(index, chunks, tmp_path: Path, name, content):
 
     with pytest.raises(SearchIndexError, match="rebuild"):
         HybridIndex.load(tmp_path / "index", chunks, HashEmbedder())
+
+
+# Reusing saved embeddings: a page group whose exact index text was already embedded by the same
+# model keeps that vector; anything else is embedded again.
+
+
+def saved_vectors(index: HybridIndex, dir: Path) -> dict[int, np.ndarray]:
+    """The index's vector for each chunk id, read back from a save."""
+    index.save(dir)
+    ids = json.loads((dir / "chunk_ids.json").read_text())
+    vectors = np.load(dir / "vectors.npy", allow_pickle=False)
+    return dict(zip(ids, vectors))
+
+
+def text_hash(c: Chunk) -> str:
+    return hashlib.sha256(index_text(c).encode()).hexdigest()
+
+
+NEW = chunk(16, "Lifeboat release", ["The on-load hook opened while the boat was hoisted."])
+
+
+def test_build_reuses_saved_embeddings_for_unchanged_text(chunks, tmp_path: Path, capsys):
+    cache = tmp_path / "index"
+    first = CountingEmbedder()
+    before = saved_vectors(HybridIndex.build(chunks, first, cache_dir=cache), tmp_path / "a")
+    assert first.calls == [[index_text(c) for c in chunks]]
+    assert "No saved embeddings to reuse; embedding all 3 page groups." in capsys.readouterr().out
+    assert (cache / CACHE_FILE).exists()
+
+    second = CountingEmbedder()
+    after = saved_vectors(
+        HybridIndex.build([*chunks, NEW], second, cache_dir=cache), tmp_path / "b"
+    )
+
+    assert second.calls == [[index_text(NEW)]]
+    for c in chunks:
+        assert np.array_equal(after[c.id], before[c.id])
+    assert "Reused 3 saved embeddings; embedding 1 new page group." in capsys.readouterr().out
+
+
+def test_a_changed_title_is_embedded_again(chunks, tmp_path: Path):
+    cache = tmp_path / "index"
+    old = saved_vectors(HybridIndex.build(chunks, CountingEmbedder(), cache_dir=cache), tmp_path / "a")
+    retitled = replace(chunks[0], report_title="Fall from an unlit gangway at night")
+
+    second = CountingEmbedder()
+    new = saved_vectors(
+        HybridIndex.build([retitled, *chunks[1:]], second, cache_dir=cache), tmp_path / "b"
+    )
+
+    assert second.calls == [[index_text(retitled)]]
+    expected = HashEmbedder().embed([index_text(retitled)])[0]
+    assert np.array_equal(new[retitled.id], expected)
+    assert not np.array_equal(new[retitled.id], old[retitled.id])
+
+
+def test_cache_from_another_model_is_ignored(chunks, tmp_path: Path, capsys):
+    cache = tmp_path / "index"
+    HybridIndex.build(chunks, CountingEmbedder("test/model-a"), cache_dir=cache)
+    capsys.readouterr()
+
+    other = CountingEmbedder("test/model-b")
+    HybridIndex.build(chunks, other, cache_dir=cache)
+
+    assert other.calls == [[index_text(c) for c in chunks]]
+    out = capsys.readouterr().out
+    assert "Saved embeddings are from another model; embedding all 3 page groups." in out
+    with np.load(cache / CACHE_FILE, allow_pickle=False) as saved:
+        assert str(saved["model"]) == "test/model-b"
+
+
+def _garbage(path: Path, hashes: list[str]) -> None:
+    path.write_bytes(b"not a saved embedding cache")
+
+
+def _lengths_differ(path: Path, hashes: list[str]) -> None:
+    vectors = np.ones((len(hashes) - 1, HashEmbedder.dim), dtype=np.float32)
+    np.savez(path, model=np.array("test/hash-model"), hashes=np.array(hashes), vectors=vectors)
+
+
+def _missing_vectors(path: Path, hashes: list[str]) -> None:
+    np.savez(path, model=np.array("test/hash-model"), hashes=np.array(hashes))
+
+
+def _other_width(path: Path, hashes: list[str]) -> None:
+    vectors = np.ones((len(hashes), HashEmbedder.dim + 1), dtype=np.float32)
+    np.savez(path, model=np.array("test/hash-model"), hashes=np.array(hashes), vectors=vectors)
+
+
+def _one_dimensional(path: Path, hashes: list[str]) -> None:
+    vectors = np.ones(len(hashes), dtype=np.float32)
+    np.savez(path, model=np.array("test/hash-model"), hashes=np.array(hashes), vectors=vectors)
+
+
+def _plain_npy(path: Path, hashes: list[str]) -> None:
+    with path.open("wb") as f:  # a plain .npy array under the cache's name, not an .npz
+        np.save(f, np.ones((len(hashes), HashEmbedder.dim), dtype=np.float32))
+
+
+def _pickled_hashes(path: Path, hashes: list[str]) -> None:
+    vectors = np.ones((len(hashes), HashEmbedder.dim), dtype=np.float32)
+    np.savez(
+        path,
+        model=np.array("test/hash-model"),
+        hashes=np.array(hashes, dtype=object),
+        vectors=vectors,
+    )
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        _garbage,
+        _lengths_differ,
+        _missing_vectors,
+        _other_width,
+        _one_dimensional,
+        _pickled_hashes,
+        _plain_npy,
+    ],
+)
+def test_unreadable_or_mismatched_cache_embeds_everything(chunks, tmp_path: Path, capsys, write):
+    cache = tmp_path / "index"
+    cache.mkdir()
+    write(cache / CACHE_FILE, [text_hash(c) for c in chunks])
+
+    embedder = CountingEmbedder()
+    index = HybridIndex.build(chunks, embedder, cache_dir=cache)
+
+    assert embedder.calls == [[index_text(c) for c in chunks]]
+    assert "embedding all 3 page groups." in capsys.readouterr().out
+    assert ids(index.search("entering a ballast tank"))[0] == 12
+    with np.load(cache / CACHE_FILE, allow_pickle=False) as saved:  # replaced by a good one
+        assert list(saved["hashes"]) == [text_hash(c) for c in chunks]
+
+
+def test_reused_build_matches_a_fresh_build(chunks, tmp_path: Path):
+    cache = tmp_path / "index"
+    HybridIndex.build(chunks, CountingEmbedder(), cache_dir=cache)
+    reused = HybridIndex.build([*chunks, NEW], CountingEmbedder(), cache_dir=cache)
+    fresh = HybridIndex.build([*chunks, NEW], CountingEmbedder())
+
+    a, b = saved_vectors(reused, tmp_path / "a"), saved_vectors(fresh, tmp_path / "b")
+    assert a.keys() == b.keys()
+    for id_ in a:
+        assert np.array_equal(a[id_], b[id_])
+    for query in ["entering a ballast tank", "lifeboat hook", "mooring line", "oxygen"]:
+        assert ids(reused.search(query)) == ids(fresh.search(query))
+
+
+def test_cache_holds_only_current_chunks(chunks, tmp_path: Path):
+    cache = tmp_path / "index"
+    HybridIndex.build(chunks, CountingEmbedder(), cache_dir=cache)
+
+    HybridIndex.build(chunks[:2], CountingEmbedder(), cache_dir=cache)
+
+    with np.load(cache / CACHE_FILE, allow_pickle=False) as saved:
+        hashes = list(saved["hashes"])
+        assert saved["vectors"].shape == (2, HashEmbedder.dim)
+    assert hashes == [text_hash(c) for c in chunks[:2]]
+    assert text_hash(chunks[2]) not in hashes
+
+
+def test_identical_texts_share_one_embedding(chunks, tmp_path: Path):
+    twin = replace(chunks[0], id=99, report_slug="test-report-99")
+    embedder = CountingEmbedder()
+
+    vectors = saved_vectors(
+        HybridIndex.build([*chunks, twin], embedder, cache_dir=tmp_path / "index"), tmp_path / "a"
+    )
+
+    assert embedder.calls == [[index_text(c) for c in chunks]]
+    assert np.array_equal(vectors[twin.id], vectors[chunks[0].id])
+
+
+def test_build_without_a_cache_dir_writes_no_cache(chunks, tmp_path: Path, capsys):
+    index = HybridIndex.build(chunks, CountingEmbedder())
+    index.save(tmp_path / "index")
+
+    assert not (tmp_path / "index" / CACHE_FILE).exists()
+    assert capsys.readouterr().out == ""

@@ -74,7 +74,7 @@ ol.plan li{display:grid;grid-template-columns:2ch 10.5rem minmax(0,1fr) 4.5rem;g
 .plan .n{font:500 14px var(--mono);color:var(--muted)}
 .plan .k{font-weight:600}
 .plan .s{font-size:14px;color:var(--muted);text-align:right}
-.plan .s.done{color:var(--green)}.plan .s.next{color:var(--orange)}
+.plan .s.done{color:var(--green)}.plan .s.now{color:var(--orange)}
 @media (max-width:600px){ol.plan li{grid-template-columns:2ch minmax(0,1fr) 4.5rem}.plan .d{grid-column:2/4;grid-row:2;color:var(--muted)}}
 footer{border-top:1px solid var(--rule);padding-top:16px;color:var(--muted);font-size:14px;display:flex;flex-direction:column;gap:4px}
 </style>
@@ -98,11 +98,11 @@ footer{border-top:1px solid var(--rule);padding-top:16px;color:var(--muted);font
 <section aria-labelledby="readings-h">
 <h2 id="readings-h">Readings</h2>
 <div class="readings">
-<div class="reading"><div class="num">619</div><div class="what">MAIB reports on merchant ships, all searchable</div><div class="was">was 21 on 30 Oct</div></div>
+<div class="reading"><div class="num">1,044</div><div class="what">reports from three publishers: MAIB 619, NTSB 353, TSIB 72</div><div class="was">was 619, MAIB only, on 6 Nov</div></div>
 <div class="reading"><div class="num o">24%</div><div class="what">of sentences not fully backed by their passage, on 33 test questions</div><div class="was">was 23% with no source, on 3</div></div>
 <div class="reading"><div class="num g">$0.0022</div><div class="what">average cost of one answer, in US dollars</div><div class="was">was $0.0026</div></div>
 </div>
-<p class="caption">Reports and cost measured 6 Nov 2026, sentences 26 Nov 2026. Every number on this page was measured; anything not yet measured says so.</p>
+<p class="caption">Reports measured 27 Nov 2026, cost 6 Nov 2026, sentences 26 Nov 2026. Every number on this page was measured; anything not yet measured says so.</p>
 </section>
 
 <section aria-labelledby="work-h">
@@ -114,14 +114,38 @@ footer{border-top:1px solid var(--rule);padding-top:16px;color:var(--muted);font
 <h2 id="log-h">Log</h2>
 
 <div class="day">
+<div class="dayhead"><time datetime="2026-11-27">27 Nov 2026</time><h3>Stage 3, part A: more reports</h3></div>
+<p class="intro">Reports from two more accident investigators: the US National Transportation Safety Board (NTSB) and the Transport Safety Investigation Bureau, Singapore (TSIB). Then the 33 working questions again, to see what a bigger library does on its own, before any guardrail work.</p>
+<table>
+<thead><tr><th scope="col">Change</th><th scope="col">Why</th><th scope="col">Result</th></tr></thead>
+<tbody>
+<tr><td>Added NTSB reports</td><td data-l="Why">More investigators means more jobs with another ship's case to learn from.</td><td data-l="Result">353 stored. 3 left out because their investigation page links no report PDF. 425 out of scope and left out: 198 investigations still open, 109 with no report, 115 on fishing, recreational or naval vessels only, and 3 safety studies.</td></tr>
+<tr><td>Picked the accident report where a page lists more than one PDF</td><td data-l="Why">Two investigations, the Dali and El Faro, list other documents beside the accident report.</td><td class="res" data-l="Result">The accident report chosen for each by reading the covers. Any other page with more than one PDF is left out and named.</td></tr>
+<tr><td>Added TSIB reports</td><td data-l="Why">The same reason.</td><td class="res" data-l="Result">All 72 listed reports stored, each with its PDF: 71 on a very serious marine casualty, 1 on a marine casualty. None left out.</td></tr>
+<tr><td>Left out Australia's reports</td><td data-l="Why">The Australian Transport Safety Bureau's website refuses scripted requests.</td><td data-l="Result">Not included.</td></tr>
+<tr><td>Checked the expected reports again</td><td data-l="Why">A question with no matching report before may have one among the new reports.</td><td data-l="Result">4 working questions that had no matching report now have one, and 13 gained reports. Nothing was removed.</td></tr>
+<tr><td>Ran the 33 working questions again</td><td data-l="Why">To measure what the bigger library does on its own, so later changes can be shown apart from it.</td><td data-l="Result">1,044 reports in all. 133 of 617 sentences (21.6%) not fully backed by their passage: 88 cited nothing, 45 were only partly backed, 0 not at all. 13 of 22 report questions passed. On 4 of 11 jobs the reports don't cover, it said so. The run cost $0.5590.</td></tr>
+<tr><td>Checked the checker by hand</td><td data-l="Why">Its numbers are only worth quoting if a person agrees with its verdicts.</td><td class="res" data-l="Result">28 of 30 agreed, above the bar of 27.</td></tr>
+</tbody>
+</table>
+<div class="wrong"><b>Still wrong</b><ul>
+<li>The bigger library pushed relevant reports out of the 8 passages the search returns. On the lists chosen before the new reports, 16 of 69 expected reports were found, down from 25. On the longer lists, 24 of 112.</li>
+<li>On 7 of 11 jobs the reports don't cover, it offered cases from a different job.</li>
+<li>The share not backed fell from 24.5% to 21.6%, mostly because the answers were longer. The checker's verdicts vary by a handful of sentences from run to run, so this is not yet a measured improvement.</li>
+</ul></div>
+</div>
+
+<div class="day">
 <div class="dayhead"><time datetime="2026-11-26">26 Nov 2026</time><h3>First scores, and checking the checker</h3></div>
 <p class="intro">The 33 working questions, answered on 19 Nov and judged again on 26 Nov after a fix to the checker.</p>
 <table>
 <thead><tr><th scope="col">Change</th><th scope="col">Why</th><th scope="col">Result</th></tr></thead>
 <tbody>
-<tr><td>First scores</td><td data-l="Why">To know where stage 3 starts.</td><td data-l="Result">131 of 539 sentences (24%) not fully backed by their passage: 90 cited nothing, 40 were only partly backed, 1 not at all. 13 of 18 report questions cited a right report. On 6 of 15 jobs the reports don't cover, it said so.</td></tr>
+<tr><td>First scores</td><td data-l="Why">To know where stage 3 starts.</td><td data-l="Result">132 of 539 sentences (24%) not fully backed by their passage: 90 cited nothing, 41 were only partly backed, 1 not at all. 13 of 18 report questions cited a right report. On 6 of 15 jobs the reports don't cover, it said so.</td></tr>
 <tr><td>Checked the checker by hand</td><td data-l="Why">Its numbers are only worth quoting if a person agrees with its verdicts.</td><td data-l="Result">First check: 24 of 30, below the bar of 27. It marked a ship's name and type as unbacked, because it never saw the report title they came from.</td></tr>
 <tr><td>Showed the checker the report title</td><td data-l="Why">An answer names the ship from the report it cites. The title may name the ship, its type and the casualty, nothing more.</td><td class="res" data-l="Result">The same answers judged again: 28 of 30 agreed. The share not backed went from 27% to 24%.</td></tr>
+<tr><td>Compared a bigger model</td><td data-l="Why">To see how much of the problem is the model and how much is the method.</td><td class="res" data-l="Result">Claude Sonnet 5.5 on the same 33 questions: 14% not backed against 24%, and 9 of 15 jobs the reports don't cover answered correctly, against 6. But twice it said "no reliable answer" when a report did cover the job, and each answer cost about 17 times as much.</td></tr>
+<tr><td>Tightened two of the checker's rules</td><td data-l="Why">Checking the Sonnet run by hand gave 25 of 30, below the bar. The checker said "not supported" when part of a sentence was in its passage, and would not let a title-only passage back the casualty it names.</td><td class="res" data-l="Result">Both runs judged again on the same answers: 28 of 30 each. The 24% held.</td></tr>
 </tbody>
 </table>
 <div class="wrong"><b>Still wrong</b><ul>
@@ -214,7 +238,7 @@ footer{border-top:1px solid var(--rule);padding-top:16px;color:var(--muted);font
 <ol class="plan">
 <li><span class="n">1</span><span class="k">Search (RAG)</span><span class="d">Find the matching report passages and answer only from them</span><span class="s done">built</span></li>
 <li><span class="n">2</span><span class="k">Test set (evals)</span><span class="d">Questions with expected answers, from people who have done the jobs</span><span class="s done">measured</span></li>
-<li><span class="n">3</span><span class="k">Guardrails</span><span class="d">Remove any sentence its passage doesn't support</span><span class="s next">next</span></li>
+<li><span class="n">3</span><span class="k">Guardrails</span><span class="d">Remove any sentence its passage doesn't support</span><span class="s now">in progress</span></li>
 <li><span class="n">4</span><span class="k">Briefings</span><span class="d">Port state control findings, the job briefing and the safety meeting pack</span><span class="s">later</span></li>
 <li><span class="n">5</span><span class="k">Running costs</span><span class="d">Trace each answer's cost and time, and re-test on every change</span><span class="s">later</span></li>
 <li><span class="n">6</span><span class="k">On board</span><span class="d">A small model that runs on board without a connection</span><span class="s">later</span></li>
@@ -223,9 +247,9 @@ footer{border-top:1px solid var(--rule);padding-top:16px;color:var(--muted);font
 </section>
 
 <footer>
-<p>Written by Varun Bhambri. Posts on LinkedIn on Tuesdays. Last updated 26 Nov 2026.</p>
+<p>Written by Varun Bhambri. Posts on LinkedIn on Tuesdays. Last updated 27 Nov 2026.</p>
 <p>Code: <a href="https://github.com/0xvarunb/telltale">github.com/0xvarunb/telltale</a> (MIT licence).</p>
-<p>Reports: UK Marine Accident Investigation Branch (MAIB), Crown copyright, used under the Open Government Licence v3.0.</p>
+<p>Reports: UK Marine Accident Investigation Branch (MAIB), Crown copyright, used under the Open Government Licence v3.0. US National Transportation Safety Board (NTSB), US Government work, not subject to copyright in the US. Transport Safety Investigation Bureau, Singapore (TSIB), public reports, each cited and linked to its PDF.</p>
 </footer>
 </div>
 </body>

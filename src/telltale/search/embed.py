@@ -8,6 +8,13 @@ import numpy as np
 
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 PROGRESS_EVERY = 500
+# fastembed's default batch of 256 page groups, each up to 512 tokens, builds attention tensors of
+# gigabytes, which on a 16 GB machine already using swap ran at about 1 s per page group and 2 of
+# 12 threads. Batches of 32 give identical vectors, keep the process near 1.5 GB and keep the
+# cores busy (about 6.5 times faster when timed on 1,000 stored page groups). Every call uses it,
+# so an incremental re-run of a few hundred new page groups is never one huge batch. Worker
+# processes (`parallel`) were slower to start and stalled under memory pressure, so none are used.
+BATCH_SIZE = 32
 
 
 class EmbedderUnavailable(Exception):
@@ -58,7 +65,7 @@ class FastEmbedder:
                     f"embedding model {self.model} could not be loaded: {error}"
                 ) from error
         rows = []
-        for row in self._model.embed(texts):
+        for row in self._model.embed(texts, batch_size=BATCH_SIZE):
             rows.append(row)
             # A full ingest embeds thousands of page groups on CPU; show it is still working.
             if len(texts) >= PROGRESS_EVERY and len(rows) % PROGRESS_EVERY == 0:

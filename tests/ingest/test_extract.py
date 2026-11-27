@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from pypdf import PdfWriter
+import pytest
+from aes_pdf import write_aes_encrypted_pdf
+from pypdf import PdfReader, PdfWriter
+from pypdf.errors import DependencyError
 
 from telltale.ingest.extract import group_by_page, pdf_pages, read_pages, to_passages
 
@@ -64,6 +67,17 @@ def test_pdf_pages_one_entry_per_page(tmp_path: Path):
         writer.write(f)
 
     assert pdf_pages(path) == ["", ""]
+
+
+def test_an_encrypted_pdf_is_read(tmp_path: Path):
+    # NTSB report PDFs are AES-encrypted with an empty user password; pypdf cannot decrypt AES
+    # without the `cryptography` package, which Telltale does not depend on.
+    path = tmp_path / "test-aes.pdf"
+    write_aes_encrypted_pdf(path, "The towing vessel struck the bridge.")
+    with pytest.raises(DependencyError):
+        [page.extract_text() for page in PdfReader(path).pages]
+
+    assert pdf_pages(path) == ["The towing vessel struck the bridge."]
 
 
 def blank_pdf(path: Path, pages: int) -> Path:

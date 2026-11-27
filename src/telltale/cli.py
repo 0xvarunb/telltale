@@ -8,6 +8,7 @@ import json
 import logging
 import subprocess
 import sys
+import time
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
@@ -27,6 +28,7 @@ from telltale.answer import (
 from telltale import card as answer_card
 from telltale.departments import RULES, departments
 from telltale.evals.judge import UnsupportedJudgeModel, judge_answer, require_judge_model
+from telltale.evals.public_set import PublicSetError, public_set_markdown
 from telltale.evals.questions import (
     BlindQuestionError,
     EvalQuestion,
@@ -37,7 +39,7 @@ from telltale.evals.questions import (
 from telltale.evals.report import REVIEW_FILE, ReportError, run_totals, write_report
 from telltale.evals.run import RUN_FILE, DirtyTreeError, RunHalted, rejudge_run, run_eval
 from telltale.http import describe
-from telltale.ingest.download import DownloadError, download_pdf
+from telltale.ingest.download import DownloadError, already_downloaded, download_pdf
 from telltale.ingest.extract import group_by_page, read_pages, to_passages
 from telltale.ingest.ocr import LocalOcr, PageReader
 from telltale.ingest.store import Store
@@ -47,7 +49,12 @@ from telltale.pricing import UnknownModelPrice, require_price
 from telltale.question import question_problem
 from telltale.search import EmbedderUnavailable, FastEmbedder, HybridIndex, SearchIndexError
 from telltale.settings import DEFAULT_JUDGE_MODEL, Settings, SettingsError, load_settings
-from telltale.sources.maib import ListingError, SkippedReport, list_merchant_reports
+from telltale.sources.common import ListingError, SkippedReport
+from telltale.sources.maib import list_merchant_reports
+from telltale.sources.ntsb import list_reports as list_ntsb_reports
+from telltale.sources.registry import publisher
+from telltale.sources.tsib import list_reports as list_tsib_reports
+from telltale.thinking import UnsupportedModel, thinking_off
 from telltale.web import create_app
 
 STORE_FILE = "telltale.sqlite"
@@ -57,8 +64,19 @@ MODEL_DIR = "models"
 DEPARTMENTS_FILE = "departments.csv"
 OCR_DIR = "ocr"
 HTTP_TIMEOUT_SECONDS = 30.0
-CROWN_COPYRIGHT = "Crown copyright"
 RUN_INGEST = "Run `telltale ingest` first."
+# The publishers `telltale ingest --source all` lists, in this order. ATSB is not among them: its
+# website refuses scripted requests, so it has no lister yet.
+INGEST_SOURCES = ("maib", "ntsb", "tsib")
+ATSB_NOT_AVAILABLE = (
+    "ATSB reports are not available yet: the ATSB website refuses scripted requests. "
+    "Use --source maib, ntsb, tsib or all."
+)
+NTSB_NEEDS_EXPORT = (
+    "NTSB reports are listed from a CAROL export saved in a browser: open "
+    "https://my.ntsb.gov/basic, search in Marine mode with no other filter, press "
+    '"Download Data (JSON)", then pass the saved file with --ntsb-export PATH.'
+)
 MODEL_OFFLINE = (
     "The search model is not available offline. Run `telltale ingest` once with internet access."
 )
@@ -66,6 +84,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 # The private eval question set, read from the working directory (the repo root).
 QUESTIONS_FILE = Path("docs/private/eval/questions.json")
+PUBLIC_SET_FILE = Path("docs/test-set.md")
 EVAL_RUNS_DIR = Path("eval") / "runs"
 FINAL_RUNS_LOG = Path("eval") / "final-runs.jsonl"
 DEFAULT_MAX_COST_USD = 1.00
@@ -159,57 +178,150 @@ def embedder(data_dir: Path) -> FastEmbedder:
     return FastEmbedder(cache_dir=data_dir / MODEL_DIR)
 
 
-def ingest(data_dir: Path, limit: int | None) -> None:
-    """List, download, extract and store MAIB reports, rebuild the search index, report."""
+def _sources_to_list(source: str, ntsb_export: Path | None) -> list[str]:
+    """The publishers to list, in order; `CommandError` before any request when `source` and
+    `ntsb_export` cannot be used together. With `all` and no export, NTSB is left out and the
+    reason printed."""
+    if source == "atsb":
+        raise CommandError(ATSB_NOT_AVAILABLE)
+    if ntsb_export is not None and source not in ("ntsb", "all"):
+        raise CommandError("--ntsb-export is used only with --source ntsb or all.")
+    if ntsb_export is not None and not ntsb_export.is_file():
+        raise CommandError(f"No CAROL export at {ntsb_export}. {NTSB_NEEDS_EXPORT}")
+    if source == "ntsb" and ntsb_export is None:
+        raise CommandError(NTSB_NEEDS_EXPORT)
+    if source != "all":
+        return [source]
+    if ntsb_export is None:
+        print(f"Skipping NTSB. {NTSB_NEEDS_EXPORT}")
+        return [s for s in INGEST_SOURCES if s != "ntsb"]
+    return list(INGEST_SOURCES)
+
+
+def _list_reports(
+    source: str,
+    client: httpx.Client,
+    limit: int | None,
+    ntsb_export: Path | None,
+    on_skip: Callable[[SkippedReport], None],
+) -> list[ReportMeta]:
+    """One publisher's reports, from its lister."""
+    if source == "maib":
+        return list_merchant_reports(client, limit=limit, on_skip=on_skip)
+    if source == "ntsb":
+        assert ntsb_export is not None  # checked by _sources_to_list
+        return list_ntsb_reports(client, export_path=ntsb_export, limit=limit, on_skip=on_skip)
+    if source == "tsib":
+        return list_tsib_reports(client, limit=limit, on_skip=on_skip)
+    raise ValueError(f"no lister for {source!r}")
+
+
+# Said when each publisher's listing starts.
+LISTING_NOTES = {
+    "maib": " (one request per report; this takes a while)",
+    "ntsb": " (one request per report; this takes a while)",
+    "tsib": " (one page)",
+}
+# Seconds to wait before each PDF download that makes a request. www.ntsb.gov sits behind
+# Cloudflare and is asked at the same pace as its investigation pages (ntsb.PAUSE_SECONDS); TSIB
+# gets a lighter pause. GOV.UK's asset host is not paused, as before.
+DOWNLOAD_PAUSE_SECONDS = {"maib": 0.0, "ntsb": 1.5, "tsib": 1.0}
+
+# Tests replace this so they never wait.
+_sleep = time.sleep
+
+
+def _print_counts(store: Store, source: str | None, indent: str) -> None:
+    """The store's counts for one publisher (with its report types), or for all of them."""
+    counts = store.counts(source)
+    page = "GOV.UK page" if source == "maib" else "web page"
+    print(f"{indent}Reports:                 {counts['reports']:,}")
+    if source is not None:
+        for kind, count in store.report_types(source).items():
+            print(f"{indent}  {kind}: {count:,}")
+    print(f"{indent}Reports with a PDF link: {counts['with_pdf']:,}")
+    print(f"{indent}Reports read from their {page} (no PDF): {counts['from_page']:,}")
+    print(f"{indent}Page groups (chunks):    {counts['chunks']:,}")
+    print(f"{indent}Passages:                {counts['passages']:,}")
+    print(f"{indent}Pages read by OCR:       {store.ocr_pages(source):,}")
+
+
+def ingest(
+    data_dir: Path, limit: int | None, source: str = "maib", ntsb_export: Path | None = None
+) -> None:
+    """List, download, extract and store one publisher's reports (or each in turn for `all`),
+    rebuild the search index from the whole store, report."""
+    sources = _sources_to_list(source, ntsb_export)
     pdf_dir, index_dir, ocr_dir = data_dir / PDF_DIR, data_dir / INDEX_DIR, data_dir / OCR_DIR
     ocr = page_reader()
-    skipped: list[SkippedReport] = []
+    skipped: dict[str, list[SkippedReport]] = {}
     failed: list[tuple[ReportMeta, str]] = []
+    listing_errors: list[str] = []
+    failed_listings: set[str] = set()
 
     with (
         httpx.Client(timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=True) as client,
         Store(data_dir / STORE_FILE) as store,
     ):
-        print("Listing MAIB reports (one request per report; this takes a while).")
-        try:
-            reports = list_merchant_reports(client, limit=limit, on_skip=skipped.append)
-        except (httpx.HTTPError, ListingError) as error:
-            raise CommandError(f"Could not list MAIB reports: {_why(error)}") from error
-        print(f"Listed {len(reports)} reports.")
-
-        for n, meta in enumerate(reports, start=1):
-            store.upsert_report(meta)
+        for source_id in sources:
+            short = publisher(source_id).short
+            print(f"Listing {short} reports{LISTING_NOTES[source_id]}.")
+            skipped[source_id] = []
             try:
-                outcome = _store_text(client, store, meta, pdf_dir, ocr, ocr_dir)
-            except ReportFailed as error:
-                failed.append((meta, str(error)))
-                logger.warning("%s: %s", meta.slug, error)
-                outcome = "FAILED, listed under errors below"
-            print(f"[{n}/{len(reports)}] {meta.slug}: {outcome}")
+                reports = _list_reports(
+                    source_id, client, limit, ntsb_export, skipped[source_id].append
+                )
+            except (httpx.HTTPError, ListingError) as error:
+                listing_errors.append(f"Could not list {short} reports: {_why(error)}")
+                failed_listings.add(source_id)
+                if len(sources) > 1:
+                    # With `all`, one publisher's failed listing does not stop the others.
+                    print(f"{listing_errors[-1]}. Carrying on with the other publishers.")
+                continue
+            print(f"Listed {len(reports)} {short} reports.")
 
-        # Always rebuilt from the whole store, never loaded (Ruling 12). A failure is reported
-        # after the lists below, so they are never lost to it.
+            pause = DOWNLOAD_PAUSE_SECONDS[source_id]
+            for n, meta in enumerate(reports, start=1):
+                store.upsert_report(meta)
+                if pause and meta.pdf_url and not already_downloaded(meta, pdf_dir):
+                    _sleep(pause)
+                try:
+                    outcome = _store_text(client, store, meta, pdf_dir, ocr, ocr_dir)
+                except ReportFailed as error:
+                    failed.append((meta, str(error)))
+                    logger.warning("%s: %s", meta.slug, error)
+                    outcome = "FAILED, listed under errors below"
+                print(f"[{n}/{len(reports)}] {meta.slug}: {outcome}")
+
+        if len(listing_errors) == len(sources):
+            # Nothing was listed, so there is nothing to index; what was left out is still said.
+            if any(skipped.values()):
+                _print_left_out(skipped, failed_listings)
+            raise CommandError("\n".join(listing_errors))
+
+        # Always rebuilt from the whole store, never loaded (Ruling 12). Only embeddings are
+        # reused: a page group keeps its saved vector when its exact index text (title and
+        # passages) was embedded before by the same model, so a changed title is embedded
+        # again and can never keep a stale vector. A failure is reported after the lists below,
+        # so they are never lost to it.
         chunks = store.chunks()
         print(f"Building the search index over {_groups(len(chunks))}.")
         index_error: Exception | None = None
         try:
-            HybridIndex.build(chunks, embedder(data_dir)).save(index_dir)
+            HybridIndex.build(chunks, embedder(data_dir), cache_dir=index_dir).save(index_dir)
         except Exception as error:
             index_error = error
             if not isinstance(error, EmbedderUnavailable):
                 # Not the expected offline case, so keep the traceback for a bug report.
                 logger.warning("The search index build failed", exc_info=error)
 
-        counts = store.counts()
         print(f"\nStore {data_dir / STORE_FILE}, all runs so far:")
-        print(f"  Reports:                 {counts['reports']:,}")
-        for kind, count in store.report_types().items():
-            print(f"    {kind}: {count:,}")
-        print(f"  Reports with a PDF link: {counts['with_pdf']:,}")
-        print(f"  Reports read from their GOV.UK page (no PDF): {counts['from_page']:,}")
-        print(f"  Page groups (chunks):    {counts['chunks']:,}")
-        print(f"  Passages:                {counts['passages']:,}")
-        print(f"  Pages read by OCR:       {store.ocr_pages():,}")
+        for stored in store.sources():
+            print(f"  {publisher(stored).short} ({publisher(stored).name}):")
+            _print_counts(store, stored, "    ")
+        if len(store.sources()) > 1:
+            print("  All publishers:")
+            _print_counts(store, None, "    ")
         if index_error is None:
             print(f"Search index saved to {index_dir}")
 
@@ -224,28 +336,60 @@ def ingest(data_dir: Path, limit: int | None) -> None:
         )
 
     _print_reports("Errors this run", [(m.title, why, m.page_url) for m, why in failed])
-    dropped = [s for s in skipped if s.dropped]
-    _print_reports(
-        "Left out of the listing because they could not be read",
-        [(s.title, s.reason, s.page_url) for s in dropped],
-    )
-    others = Counter(s.reason for s in skipped if not s.dropped)
-    detail = ", ".join(f"{kind} {count}" for kind, count in sorted(others.items()))
-    print(
-        f"\nOther report types left out: {others.total()}"
-        + (f" ({detail})" if detail else "")
-    )
+    _print_left_out(skipped, failed_listings)
 
+    problems = list(listing_errors)
     if isinstance(index_error, EmbedderUnavailable):
-        raise CommandError(
-            f"\nThe search index was not built: {index_error}. The reports above are stored; "
+        problems.append(
+            f"The search index was not built: {index_error}. The reports above are stored; "
             "run `telltale ingest` again with internet access to build it."
-        ) from index_error
-    if index_error is not None:
-        raise CommandError(
-            f"\nThe search index was not built: {type(index_error).__name__}: {index_error}. "
+        )
+    elif index_error is not None:
+        problems.append(
+            f"The search index was not built: {type(index_error).__name__}: {index_error}. "
             "The reports above are stored; run `telltale ingest` again to build it."
-        ) from index_error
+        )
+    if problems:
+        raise CommandError("\n" + "\n".join(problems)) from index_error
+
+
+def _print_left_out(skipped: dict[str, list[SkippedReport]], failed_listings: set[str]) -> None:
+    """The results each publisher's listing left out: those it could not read, one by one, then
+    a count of those out of scope. A publisher whose listing failed is said to have failed, not
+    given a count of 0."""
+    dropped = {
+        source_id: [s for s in skips if s.dropped] for source_id, skips in skipped.items()
+    }
+    print(
+        "\nLeft out of the listing because they could not be read "
+        f"({sum(len(skips) for skips in dropped.values())}):"
+    )
+    for source_id, skips in dropped.items():
+        if skips:
+            print(f"  {publisher(source_id).short} ({len(skips)}):")
+            for s in skips:
+                print(f"    - {s.title}{': ' + s.reason if s.reason else ''}")
+                print(f"      {s.page_url or 'no page link'}")
+    print("\nOut of scope, left out:")
+    for source_id, skips in skipped.items():
+        others = Counter(s.reason for s in skips if not s.dropped)
+        detail = ", ".join(f"{kind} {count}" for kind, count in sorted(others.items()))
+        count = f"{others.total()}" + (f" ({detail})" if detail else "")
+        if source_id not in failed_listings:
+            line = count
+        elif others:
+            line = f"{count} before the listing failed"
+        else:
+            line = "listing failed"
+        print(f"  {publisher(source_id).short}: {line}")
+
+
+def _thinking_off_or_refuse(model: str) -> None:
+    """`CommandError` when `model` has no thinking-off setting, before any key use or call."""
+    try:
+        thinking_off(model)
+    except UnsupportedModel as error:
+        raise CommandError(str(error)) from error
 
 
 def load_index(data_dir: Path) -> HybridIndex:
@@ -271,6 +415,7 @@ def print_answer(result: Answer) -> None:
     numbers: dict[str, int] = {}
     titles: dict[str, str] = {}
     pages: dict[str, int | None] = {}
+    credits: dict[str, str] = {}
     notice, notice_only = stop_notice(result)
 
     if notice_only:
@@ -286,6 +431,7 @@ def print_answer(result: Answer) -> None:
                 number = numbers.setdefault(citation.source, len(numbers) + 1)
                 titles.setdefault(citation.source, citation.report_title)
                 pages.setdefault(citation.source, citation.page)
+                credits.setdefault(citation.source, publisher(citation.source_id).source_credit)
                 if number not in refs:
                     refs.append(number)
             n += 1
@@ -305,7 +451,7 @@ def print_answer(result: Answer) -> None:
         print("\nSources:")
         for source, number in numbers.items():
             where = f", page {pages[source]}" if pages[source] is not None else ""
-            print(f"[{number}] {titles[source]}{where}. {CROWN_COPYRIGHT}.")
+            print(f"[{number}] {titles[source]}{where}. {credits[source]}.")
             print(f"    {source}")
 
     print(
@@ -338,6 +484,7 @@ def ask(
         raise CommandError("--sentences only applies with --card.")
     question = question.strip()
     settings = _settings_with_key("ask")
+    _thinking_off_or_refuse(settings.model)
     index = load_index(settings.data_dir)
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     try:
@@ -391,6 +538,7 @@ def card(saved: Path, out: Path, sentences: str | None) -> None:
 def serve(host: str, port: int) -> None:
     """Load the store, index and embedding model once, then run the web page until stopped."""
     settings = _settings_with_key("serve")
+    _thinking_off_or_refuse(settings.model)
     index = load_index(settings.data_dir)
     try:
         # Loads the embedding model now, so an offline laptop fails here, not on the first question.
@@ -401,8 +549,12 @@ def serve(host: str, port: int) -> None:
         raise CommandError(
             f"The search index is missing or out of date: {error}. {RUN_INGEST}"
         ) from error
+    with Store(settings.data_dir / STORE_FILE) as store:
+        publisher_ids = store.sources()
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    app = create_app(lambda question: answer(question, index, client, settings.model))
+    app = create_app(
+        lambda question: answer(question, index, client, settings.model), publisher_ids
+    )
     print(f"Telltale is running at http://{host}:{port}/ (press Ctrl+C to stop).")
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
@@ -470,6 +622,30 @@ def evaluate_report(run_dir: Path) -> None:
     except QuestionFileError as error:
         raise CommandError(str(error)) from error
     _write_run_report(run_dir, questions)
+
+
+def evaluate_public_set(out: Path) -> None:
+    """Write the working questions and their chosen reports as a public page. Blind questions
+    are left out and only counted. No key, no cost."""
+    data_dir = load_settings(require_key=False).data_dir
+    try:
+        questions = _load_eval_questions(data_dir)
+    except QuestionFileError as error:
+        raise CommandError(str(error)) from error
+    working = select(questions, final=False)
+    with Store(data_dir / STORE_FILE) as store:
+        reports = {meta.slug: meta for meta in store.reports()}
+    try:
+        page = public_set_markdown(working, reports, held_back=len(questions) - len(working))
+    except PublicSetError as error:
+        raise CommandError(str(error)) from error
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(page, encoding="utf-8")
+    except OSError as error:
+        raise CommandError(f"Could not write the test set page: {error}") from error
+    noun = "question" if len(working) == 1 else "questions"
+    print(f"Test set page written to {out} ({len(working)} working {noun}).")
 
 
 def evaluate_rejudge(source_dir: Path, judge_model: str, max_cost: float) -> None:
@@ -556,7 +732,7 @@ def evaluate(
     With `batch`, the answers and then the judge calls go as two Message Batches, at half the
     live price; the run waits for each to end.
 
-    Every refusal (a model with no price, no question file, an unknown or blind id, a dirty tree
+    Every refusal (a model with no price or no thinking-off setting, no question file, an unknown or blind id, a dirty tree
     for a final run) comes before the key, the search index or any model is touched.
     """
     settings = load_settings(require_key=False)
@@ -567,6 +743,12 @@ def evaluate(
         require_judge_model(judge_model)
     except (UnknownModelPrice, UnsupportedJudgeModel) as error:
         raise CommandError(str(error)) from error
+    try:
+        thinking_off(answer_model)
+    except UnsupportedModel as error:
+        raise CommandError(
+            f"{error} Until then its answers would not compare with the others."
+        ) from error
     try:
         questions = select(_load_eval_questions(data_dir), final=final, only=_only(only))
     except (QuestionFileError, BlindQuestionError) as error:
@@ -766,13 +948,28 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     ingest_parser = commands.add_parser(
         "ingest",
-        help="download MAIB reports and build the search index",
-        description="List MAIB merchant-ship reports, download and extract their "
-        "PDFs into the store, rebuild the search index and list any report left unsearchable. "
-        "Safe to re-run: PDFs already downloaded are kept. Needs no API key.",
+        help="download accident reports and build the search index",
+        description="List one publisher's merchant-ship reports (MAIB unless --source says "
+        "otherwise), download and extract their PDFs into the store, rebuild the search index "
+        "from every report stored and list any report left unsearchable. Safe to re-run: PDFs "
+        "already downloaded are kept. Needs no API key.",
     )
     ingest_parser.add_argument(
-        "--limit", type=_positive, metavar="N", help="stop after N reports"
+        "--source",
+        choices=("maib", "atsb", "ntsb", "tsib", "all"),
+        default="maib",
+        help="whose reports to list: maib (the default), ntsb, tsib, or all of them in turn. "
+        "atsb is not available yet",
+    )
+    ingest_parser.add_argument(
+        "--ntsb-export",
+        type=Path,
+        metavar="PATH",
+        help="the CAROL export (JSON, saved in a browser) that NTSB reports are listed from; "
+        "needed for --source ntsb",
+    )
+    ingest_parser.add_argument(
+        "--limit", type=_positive, metavar="N", help="stop after N reports from each publisher"
     )
     ask_parser = commands.add_parser(
         "ask",
@@ -888,6 +1085,21 @@ def _parser() -> argparse.ArgumentParser:
         help="do not send the judge batch if its estimated cost would pass this "
         f"(default {DEFAULT_MAX_COST_USD:.2f})",
     )
+    public_set_parser = commands.add_parser(
+        "eval-public-set",
+        help="write the working eval questions as a public test set page",
+        description=f"Write the working questions in {QUESTIONS_FILE}, each with the reports "
+        "chosen for it as titles linked to the publisher's page for each report, as a markdown "
+        "page. Blind "
+        "questions are left out and only counted; no report text is copied. Needs the "
+        "question file and a finished `telltale ingest`; no API key, no cost.",
+    )
+    public_set_parser.add_argument(
+        "--out",
+        type=Path,
+        default=PUBLIC_SET_FILE,
+        help=f"where to write the page (default {PUBLIC_SET_FILE})",
+    )
     return parser
 
 
@@ -896,7 +1108,12 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
     try:
         if args.command == "ingest":
-            ingest(load_settings(require_key=False).data_dir, args.limit)
+            ingest(
+                load_settings(require_key=False).data_dir,
+                args.limit,
+                args.source,
+                args.ntsb_export,
+            )
         elif args.command == "ask":
             ask(args.question, args.save, args.card, args.sentences)
         elif args.command == "card":
@@ -911,6 +1128,8 @@ def main(argv: list[str] | None = None) -> int:
             evaluate_report(args.run_dir)
         elif args.command == "eval-rejudge":
             evaluate_rejudge(args.run_dir, args.judge_model, args.max_cost)
+        elif args.command == "eval-public-set":
+            evaluate_public_set(args.out)
         else:
             serve(args.host, args.port)
     except CommandError as error:

@@ -1,7 +1,7 @@
 """The question page: one form, and the cited answer shown under it with its sources."""
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -22,6 +22,7 @@ from telltale.answer import (
 )
 from telltale.models import Answer
 from telltale.question import EMPTY_QUESTION, TOO_LONG, question_problem
+from telltale.sources.registry import publisher
 
 HERE = Path(__file__).parent
 OTHER_SITE = "This question came from another website, so it was not asked. Ask it on this page."
@@ -48,6 +49,7 @@ class SourceEntry:
     title: str
     page: int | None
     link: str | None
+    credit: str  # the publisher's source credit
     passages: list[str] = field(default_factory=list)
 
 
@@ -68,6 +70,8 @@ class View:
     cost: str
     searched: list[SearchedEntry] = field(default_factory=list)
     searched_closing: str = SEARCHED_CLOSING
+    # The source credit of each publisher of the reports searched, once each, in their order.
+    searched_credits: list[str] = field(default_factory=list)
 
 
 def _link(source: str) -> str | None:
@@ -96,6 +100,7 @@ def to_view(result: Answer) -> View:
                         title=citation.report_title,
                         page=citation.page,
                         link=_link(citation.source),
+                        credit=publisher(citation.source_id).source_credit,
                     )
                     entries[citation.source] = entry
                 if citation.cited_text not in entry.passages:
@@ -107,9 +112,14 @@ def to_view(result: Answer) -> View:
         f"Cost ${result.cost_usd:.4f} "
         f"({result.input_tokens:,} tokens in, {result.output_tokens:,} out)"
     )
+    searched_chunks = reports_searched(result.chunks) if is_no_answer_result(result) else []
     searched = [
         SearchedEntry(title=chunk.report_title, page=chunk.source_page, link=_link(chunk.source))
-        for chunk in (reports_searched(result.chunks) if is_no_answer_result(result) else [])
+        for chunk in searched_chunks
+    ]
+    searched_credits = [
+        publisher(source_id).source_credit
+        for source_id in dict.fromkeys(chunk.source_id for chunk in searched_chunks)
     ]
     return View(
         lines=lines,
@@ -117,6 +127,7 @@ def to_view(result: Answer) -> View:
         notice=notice,
         cost=cost,
         searched=searched,
+        searched_credits=searched_credits,
     )
 
 
@@ -131,13 +142,33 @@ def _same_origin(request: Request) -> bool:
     return urlsplit(origin).netloc.lower() == request.headers.get("host", "").lower()
 
 
-def create_app(answer_fn: Callable[[str], Answer]) -> FastAPI:
-    """The page, answering each question with `answer_fn`."""
+def _names(shorts: list[str]) -> str:
+    """"MAIB", "MAIB and NTSB", "MAIB, NTSB and TSIB"."""
+    return shorts[0] if len(shorts) == 1 else f"{', '.join(shorts[:-1])} and {shorts[-1]}"
+
+
+def create_app(
+    answer_fn: Callable[[str], Answer], publisher_ids: Sequence[str] = ("maib",)
+) -> FastAPI:
+    """The page, answering each question with `answer_fn`. The footer credits each publisher in
+    `publisher_ids` (those with reports in the store); none credited when it is empty. The
+    limits page names and credits the same publishers (MAIB when there are none, the default
+    source of `telltale ingest`).
+
+    Raises KeyError naming an unknown publisher id.
+    """
     app = FastAPI(title="Telltale", docs_url=None, redoc_url=None, openapi_url=None)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     templates = Environment(loader=FileSystemLoader(HERE / "templates"), autoescape=True)
+    templates.globals["reports_credit"] = "; ".join(
+        publisher(source_id).footer_credit for source_id in publisher_ids
+    )
     page = templates.get_template("index.html")
     limits_page = templates.get_template("limits.html")
+    covered = list(publisher_ids) or ["maib"]
+    limits_html = limits_page.render(
+        covered=covered, covered_names=_names([publisher(p).short for p in covered])
+    )
 
     def render(question: str = "", message: str | None = None, view: View | None = None):
         return HTMLResponse(page.render(question=question, message=message, view=view))
@@ -149,7 +180,7 @@ def create_app(answer_fn: Callable[[str], Answer]) -> FastAPI:
     @app.get("/limits", response_class=HTMLResponse)
     def limits() -> HTMLResponse:
         """What this tool can't do: the same text as docs/limits.md."""
-        return HTMLResponse(limits_page.render())
+        return HTMLResponse(limits_html)
 
     @app.get("/ask")
     def ask_by_link() -> RedirectResponse:

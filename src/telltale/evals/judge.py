@@ -24,6 +24,7 @@ from telltale.answer import is_no_answer
 from telltale.evals.score import Verdict
 from telltale.models import Citation, Sentence
 from telltale.pricing import cost_usd, require_price
+from telltale.thinking import THINKING_OFF, UnsupportedModel, thinking_off
 
 MAX_TOKENS = 300
 # What the judge may answer. "unjudged" is ours alone, for a sentence with no readable verdict.
@@ -35,9 +36,10 @@ JUDGE_SYSTEM = (
     "- supported: every claim in the sentence is stated in the passages.\n"
     "- partly: some claims are stated, at least one is not, or the sentence makes a claim "
     "stronger or more certain than the passages.\n"
-    "- not_supported: the passages do not state the sentence's claims.\n"
+    "- not_supported: none of the sentence's claims are stated in the passages.\n"
     "Each passage is headed by the title of the report it comes from. Use that title only "
-    "to tell which ship the passage is about, its type and the casualty the title names; "
+    "to tell which ship the passage is about, its type and the casualty the title names, "
+    "even when a passage is only the title; "
     "the title does not back causes, the order of events or any other detail.\n"
     "Judge only against the passages. Do not use your own knowledge of ships, regulations "
     "or the casualty."
@@ -53,23 +55,14 @@ VERDICT_SCHEMA = {
     "additionalProperties": False,
 }
 
-# The lowest thinking setting each judge model accepts; any other value is a 400 error there.
-# From the per-model table at https://platform.claude.com/docs/en/build-with-claude/thinking
-# (read 19 Nov 2026): Claude Sonnet 5.5 takes "between_tools" (with no tools in the request,
-# the reply is text only) and refuses "disabled"; Claude Haiku 5.5 takes "disabled". Both work
-# at the default effort. A model not listed here is refused before any call.
-THINKING_OFF: dict[str, dict] = {
-    "claude-sonnet-5-5": {"type": "between_tools"},
-    "claude-haiku-5-5": {"type": "disabled"},
-}
-
 # Errors that could pass on a retry. The SDK has already retried these by the time one reaches
 # us, so the sentence is left unjudged and the run goes on.
 RETRYABLE_ERRORS = (anthropic.RateLimitError, anthropic.APIConnectionError)
 
 
-class UnsupportedJudgeModel(ValueError):
-    """Raised for a judge model with no known setting that turns its thinking off."""
+class UnsupportedJudgeModel(UnsupportedModel):
+    """Raised for a judge model with no known setting that turns its thinking off
+    (`THINKING_OFF` in `telltale.thinking`)."""
 
 
 def is_retryable(error: BaseException) -> bool:
@@ -82,12 +75,14 @@ def is_retryable(error: BaseException) -> bool:
 def require_judge_model(model: str) -> None:
     """Refuse a judge model with no price or no thinking-off setting, before any call."""
     require_price(model)
-    if model not in THINKING_OFF:
+    try:
+        thinking_off(model)
+    except UnsupportedModel:
         raise UnsupportedJudgeModel(
             f"The judge model {model} has no known setting that turns its thinking off, so "
             f"{MAX_TOKENS} tokens may not hold its verdict. Add it to THINKING_OFF in "
-            f"telltale/evals/judge.py first (listed now: {', '.join(THINKING_OFF)})."
-        )
+            f"telltale/thinking.py first (listed now: {', '.join(THINKING_OFF)})."
+        ) from None
 
 
 def build_judge_request(sentence: str, passages: list[tuple[str, str]], model: str) -> dict:
@@ -111,7 +106,7 @@ def build_judge_request(sentence: str, passages: list[tuple[str, str]], model: s
         "model": model,
         "max_tokens": MAX_TOKENS,
         "system": JUDGE_SYSTEM,
-        "thinking": THINKING_OFF[model],
+        "thinking": thinking_off(model),
         "output_config": {"format": {"type": "json_schema", "schema": VERDICT_SCHEMA}},
         "messages": [{"role": "user", "content": content}],
     }

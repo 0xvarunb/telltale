@@ -560,3 +560,10 @@ def test_page_html_only_kept_when_there_is_no_pdf(mock_api):
     assert reports["test-vessel-report-alpha"].page_html is None
     assert reports["test-vessel-report-bravo"].page_html is None
     assert reports["test-vessel-report-charlie"].page_html is not None
+
+
+def test_listing_error_and_skipped_report_are_the_shared_ones():
+    from telltale.sources import common
+
+    assert maib.ListingError is common.ListingError
+    assert maib.SkippedReport is common.SkippedReport

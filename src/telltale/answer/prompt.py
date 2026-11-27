@@ -1,6 +1,8 @@
 """The system prompt and request for a cited answer from retrieved report passages."""
 
 from telltale.models import Chunk
+from telltale.sources.registry import publisher
+from telltale.thinking import thinking_off
 
 # The one sentence for a job the reports do not cover. Shown plainly, with no "no source" mark.
 NO_ANSWER = "There is no reliable answer in these reports for that job."
@@ -50,7 +52,9 @@ def result_title(chunk: Chunk) -> str:
 
 
 def build_request(question: str, chunks: list[Chunk], model: str) -> dict:
-    """Arguments for `client.messages.create`: one search result per chunk, then the question.
+    """Arguments for `client.messages.create`: one search result per chunk, then the question,
+    with the model's thinking turned off (`telltale.thinking.THINKING_OFF`). A model with no
+    thinking-off setting is refused (`UnsupportedModel`).
 
     Never sends temperature, top_p or top_k.
     """
@@ -62,7 +66,10 @@ def build_request(question: str, chunks: list[Chunk], model: str) -> dict:
             "content": [
                 {
                     "type": "text",
-                    "text": f"This passage is from the MAIB report: {chunk.report_title}.",
+                    "text": (
+                        f"This passage is from the {publisher(chunk.source_id).short} report: "
+                        f"{chunk.report_title}."
+                    ),
                 },
                 *({"type": "text", "text": passage} for passage in chunk.passages),
             ],
@@ -74,6 +81,7 @@ def build_request(question: str, chunks: list[Chunk], model: str) -> dict:
         "model": model,
         "max_tokens": MAX_TOKENS,
         "system": SYSTEM_PROMPT,
+        "thinking": thinking_off(model),
         "messages": [
             {"role": "user", "content": [*results, {"type": "text", "text": question}]}
         ],

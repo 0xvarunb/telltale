@@ -6,9 +6,11 @@ too: nothing here is estimated.
 
 - Answers: 19 Nov 2026, commit b5d7679, answering model Claude Haiku 5.5, batch mode, run
   `20261119-2008-b5d7679-claude-haiku-5-5`.
-- Checker: re-judged 26 Nov 2026, commit 901bb2a, checker model Claude Sonnet 5.5, run
-  `20261126-1931-901bb2a-claude-haiku-5-5-rejudged` (the same 33 answers, judged again after the
-  checker fix below).
+- Checker: Claude Sonnet 5.5. The figures below are from the same 33 answers judged again on
+  26 Nov 2026 after two fixes to the checker (below), commit 91ee332, run
+  `20261126-2112-91ee332-claude-haiku-5-5-rejudged`.
+- Model comparison: Claude Sonnet 5.5 answering the same 33 questions, 26 Nov 2026, commit
+  e22bf99, judged at commit 91ee332, run `20261126-2113-91ee332-claude-sonnet-5-5-rejudged`.
 - Run folders are under `data/eval/runs/`, which is git-ignored.
 
 ## The test set
@@ -18,16 +20,17 @@ deck, the bridge and cargo work. For 27 of them the reports that should come up 
 the question was asked. For 23 the right answer is that the reports don't cover the job, and the
 tool should say so.
 
-The set is kept private, so the tool can't be tuned to it. 17 questions are held back and have
-never been run. They run once, at the end of stage 3. The other 33 are the working questions, and
-every figure on this page is from those 33.
+The 33 working questions and their chosen reports are published in
+[test-set.md](test-set.md). The other 17 are held back, never published and never run, so the tool
+can't be tuned to them. They run once, at the end of stage 3. Every figure on this page is from the
+33 working questions.
 
 ## Headline
 
-**Sentences not backed by their cited passage: 131 of 539 (24.3%).**
+**Sentences not backed by their cited passage: 132 of 539 (24.5%).**
 
 - 90 had no citation at all.
-- 40 were judged "partly": the passage backs some of the sentence but not all of it, or the
+- 41 were judged "partly": the passage backs some of the sentence but not all of it, or the
   sentence states it more strongly than the report does (for example dropping "probable").
 - 1 was judged "not supported".
 - 0 were left unjudged.
@@ -73,54 +76,88 @@ seed from the working questions. Its numbers are quoted only if at least 27 of t
   events or other detail. The same 33 answers were judged again.
 - **Second check: 28 of 30.** It passed. The two disagreements were judgement calls, one each
   way, neither about titles.
-- The re-judge moved the headline from 146 of 539 (27.1%) to 131 of 539 (24.3%). About 20
-  sentences moved from "partly" to "supported" because of the titles. About 6 moved the other way
-  with no change behind them, so the checker's verdicts vary a little from one run to the next.
+- **A third check, on the Sonnet run below: 25 of 30.** It failed on the same two patterns seen
+  in the second check. The checker said "not supported" when part of a sentence was in its
+  passage, which by its own rules is "partly", and it would not let a passage that is only the
+  report's title back the casualty that title names.
+- **The second fix:** "not supported" now means none of the sentence's claims are in the
+  passages, and a title-only passage backs the casualty its title names. Both runs were judged
+  again on their same answers, and each check came out at **28 of 30**.
+- The headline has moved with each fix: 146 of 539 (27.1%) at first, 131 (24.3%) after the title
+  fix, 132 (24.5%) after the second fix. The checker's verdicts vary a little from one run to the
+  next (a handful of sentences move with no change behind them), so differences of one or two
+  sentences mean nothing.
+
+## Model comparison
+
+The same 33 questions, the same search and the same checker. Every answering model runs with its
+up-front thinking turned off, as the checker does. Claude Opus 5.5 is left out: Anthropic's
+documentation says its thinking can't be turned off, so it can't be compared on the same terms.
+
+| | Claude Haiku 5.5 | Claude Sonnet 5.5 |
+| --- | --- | --- |
+| Sentences not backed | 132 of 539 (24.5%) | 72 of 514 (14.0%) |
+| with no citation at all | 90 | 39 |
+| judged "partly" | 41 | 31 |
+| judged "not supported" | 1 | 2 |
+| Report questions passed | 13 of 18 | 14 of 18 |
+| No-answer questions passed | 6 of 15 | 9 of 15 |
+| Report questions wrongly answered "no reliable answer" | 0 | 2 |
+| Answer cost per question | $0.0013 | $0.0222 |
+| Checker hand-check | 28 of 30 | 28 of 30 |
+
+The search is the same for both, so 25 of the 69 chosen reports reached the 8 passages either way.
+Sonnet cites far more of what it writes and says "no reliable answer" more often when it should,
+but twice it said so on a job the reports do cover (A29 and A33), which Haiku never did. It costs
+about 17 times as much per answer.
 
 ## Cost
 
-- Answers: $0.0443 for 33 questions.
-- Checker: $0.3844 for the first judging, $0.4352 for the re-judge.
-- Two one-question dry runs before the real run: $0.0426.
-- All stage 2 runs together: $0.9065. Every run went as a Message Batch, at half the live price.
+- Haiku answers: $0.0443 for 33 questions. Sonnet answers: $0.7319.
+- Checker: $0.3844 for the first judging, $0.4352 after the title fix, then $0.4412 (Haiku) and
+  $0.4606 and $0.4657 (Sonnet, first judging and after the second fix).
+- Three one-question dry runs: $0.0893.
+- All stage 2 runs together: $3.0526. Every run went as a Message Batch, at half the live price.
 
 ## Per question (working questions only)
 
-| id | expect | passed | chosen reports cited | chosen reports in the 8 passages | sentences | not backed |
-| --- | --- | --- | --- | --- | --- | --- |
-| A3 | reports | yes | 2 of 5 | 2 of 5 | 21 | 10 |
-| A4 | no answer | yes | - | - | 1 | 0 |
-| A5 | no answer | no | - | - | 19 | 5 |
-| A6 | no answer | yes | - | - | 1 | 0 |
-| A7 | no answer | no | - | - | 19 | 4 |
-| A9 | no answer | no | - | - | 30 | 9 |
-| A10 | reports | yes | 1 of 2 | 1 of 2 | 26 | 8 |
-| A12 | reports | yes | 1 of 7 | 2 of 7 | 18 | 3 |
-| A13 | no answer | yes | - | - | 1 | 0 |
-| A15 | reports | yes | 2 of 4 | 3 of 4 | 24 | 5 |
-| A17 | no answer | yes | - | - | 1 | 0 |
-| A18 | reports | yes | 1 of 3 | 2 of 3 | 17 | 4 |
-| A22 | no answer | yes | - | - | 1 | 0 |
-| A23 | reports | no | 0 of 3 | 1 of 3 | 25 | 4 |
-| A24 | no answer | no | - | - | 23 | 3 |
-| A26 | reports | yes | 2 of 5 | 2 of 5 | 30 | 7 |
-| A28 | reports | yes | 1 of 3 | 1 of 3 | 14 | 2 |
-| A29 | reports | yes | 1 of 3 | 2 of 3 | 13 | 4 |
-| A30 | no answer | no | - | - | 19 | 7 |
-| A31 | reports | no | 0 of 4 | 1 of 4 | 20 | 5 |
-| A32 | no answer | no | - | - | 23 | 4 |
-| A33 | reports | no | 0 of 1 | 1 of 1 | 20 | 6 |
-| A34 | reports | yes | 3 of 5 | 3 of 5 | 31 | 6 |
-| A35 | reports | yes | 1 of 4 | 1 of 4 | 18 | 5 |
-| A36 | reports | yes | 1 of 2 | 1 of 2 | 24 | 4 |
-| A37 | reports | no | 0 of 3 | 0 of 3 | 23 | 9 |
-| A42 | no answer | no | - | - | 9 | 3 |
-| A43 | no answer | no | - | - | 16 | 3 |
-| A46 | reports | yes | 1 of 5 | 1 of 5 | 15 | 2 |
-| A47 | reports | yes | 1 of 3 | 1 of 3 | 28 | 6 |
-| A49 | reports | no | 0 of 7 | 0 of 7 | 9 | 1 |
-| A50 | no answer | no | - | - | 5 | 2 |
-| A51 | no answer | yes | - | - | 1 | 0 |
+Haiku 5.5 unless marked Sonnet.
+
+| id | expect | passed | chosen reports cited | chosen reports in the 8 passages | sentences | not backed | Sonnet: passed | Sonnet: sentences | Sonnet: not backed |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A3 | reports | yes | 2 of 5 | 2 of 5 | 21 | 11 | yes | 22 | 2 |
+| A4 | no answer | yes | - | - | 1 | 0 | yes | 1 | 0 |
+| A5 | no answer | no | - | - | 19 | 5 | no | 10 | 4 |
+| A6 | no answer | yes | - | - | 1 | 0 | yes | 1 | 0 |
+| A7 | no answer | no | - | - | 19 | 4 | no | 20 | 2 |
+| A9 | no answer | no | - | - | 30 | 9 | no | 35 | 7 |
+| A10 | reports | yes | 1 of 2 | 1 of 2 | 26 | 8 | yes | 25 | 7 |
+| A12 | reports | yes | 1 of 7 | 2 of 7 | 18 | 3 | yes | 19 | 2 |
+| A13 | no answer | yes | - | - | 1 | 0 | yes | 1 | 0 |
+| A15 | reports | yes | 2 of 4 | 3 of 4 | 24 | 4 | yes | 32 | 4 |
+| A17 | no answer | yes | - | - | 1 | 0 | yes | 1 | 0 |
+| A18 | reports | yes | 1 of 3 | 2 of 3 | 17 | 4 | yes | 10 | 0 |
+| A22 | no answer | yes | - | - | 1 | 0 | yes | 1 | 0 |
+| A23 | reports | no | 0 of 3 | 1 of 3 | 25 | 4 | yes | 46 | 5 |
+| A24 | no answer | no | - | - | 23 | 3 | no | 11 | 1 |
+| A26 | reports | yes | 2 of 5 | 2 of 5 | 30 | 7 | yes | 47 | 4 |
+| A28 | reports | yes | 1 of 3 | 1 of 3 | 14 | 3 | yes | 15 | 1 |
+| A29 | reports | yes | 1 of 3 | 2 of 3 | 13 | 4 | no | 1 | 0 |
+| A30 | no answer | no | - | - | 19 | 7 | no | 25 | 4 |
+| A31 | reports | no | 0 of 4 | 1 of 4 | 20 | 5 | yes | 7 | 0 |
+| A32 | no answer | no | - | - | 23 | 4 | yes | 1 | 0 |
+| A33 | reports | no | 0 of 1 | 1 of 1 | 20 | 6 | no | 1 | 0 |
+| A34 | reports | yes | 3 of 5 | 3 of 5 | 31 | 6 | yes | 42 | 5 |
+| A35 | reports | yes | 1 of 4 | 1 of 4 | 18 | 5 | yes | 24 | 2 |
+| A36 | reports | yes | 1 of 2 | 1 of 2 | 24 | 4 | yes | 20 | 6 |
+| A37 | reports | no | 0 of 3 | 0 of 3 | 23 | 8 | no | 27 | 4 |
+| A42 | no answer | no | - | - | 9 | 3 | no | 15 | 4 |
+| A43 | no answer | no | - | - | 16 | 3 | yes | 1 | 0 |
+| A46 | reports | yes | 1 of 5 | 1 of 5 | 15 | 3 | yes | 22 | 2 |
+| A47 | reports | yes | 1 of 3 | 1 of 3 | 28 | 6 | yes | 28 | 4 |
+| A49 | reports | no | 0 of 7 | 0 of 7 | 9 | 1 | no | 12 | 2 |
+| A50 | no answer | no | - | - | 5 | 2 | yes | 1 | 0 |
+| A51 | no answer | yes | - | - | 1 | 0 | yes | 1 | 0 |
 
 The questions themselves are not published. The ids are their numbers in the private set.
 

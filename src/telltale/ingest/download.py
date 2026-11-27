@@ -28,6 +28,12 @@ def pdf_path(meta: ReportMeta, dest: Path) -> Path:
     return dest / f"{slug}-{url_hash}.pdf"
 
 
+def already_downloaded(meta: ReportMeta, dest: Path) -> bool:
+    """True when the report's PDF is already complete in `dest`, so `download_pdf` asks nothing."""
+    path = pdf_path(meta, dest)
+    return path.is_file() and path.stat().st_size > 0
+
+
 def download_pdf(client: httpx.Client, meta: ReportMeta, dest: Path) -> Path | None:
     """The report's PDF in directory `dest`, downloaded only if not already there.
 
@@ -39,7 +45,7 @@ def download_pdf(client: httpx.Client, meta: ReportMeta, dest: Path) -> Path | N
         return None
 
     path = pdf_path(meta, dest)
-    if path.is_file() and path.stat().st_size > 0:
+    if already_downloaded(meta, dest):
         return path
 
     dest.mkdir(parents=True, exist_ok=True)
